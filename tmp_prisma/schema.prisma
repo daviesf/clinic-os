@@ -1,0 +1,12 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./test.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Test {
+  id Int @id @default(autoincrement())
+}

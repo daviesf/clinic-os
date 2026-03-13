@@ -1,0 +1,1061 @@
+
+============================================================
+FILE: audit_report.md
+============================================================
+# Relatório de Auditoria Técnica - ClinicOS
+
+**Data:** 10/02/2026
+**Versão Auditada:** 1.0.0 (Initial Setup)
+**Maturidade Geral:** 2/10 (Protótipo Inicial)
+
+## 1. Arquitetura Geral
+**Status:** ⚠️ Incompleta
+
+- **Isolamento:** Os módulos (`whatsapp`, `conversations`, `scheduling`) estão em pastas separadas, o que é bom.
+- **Integração:** **Crítico.** Os módulos existem mas **não estão conectados**. O arquivo `server.ts` apenas inicia o Express, mas não instancia o `WhatsAppManager` nem o `SchedulingService`. O sistema, como está, não faz nada ao iniciar.
+- **Rotas:** Nenhuma rota API foi definida. Não há como criar tenants, consultar agendamentos ou iniciar sessões externamente.
+
+## 2. Multi-Tenancy
+**Status:** ⚠️ Funcional (Lógica) / 🔴 Risco (Arquitetura)
+
+- **Dados:** O Schema do Prisma utiliza corretamente `tenantId` em todas as tabelas relevantes (`User`, `Tenant`, `Appointment`, `Conversation`).
+- **Isolamento de Sessão:** O `WhatsAppManager` usa `clientId` para separar sessões do navegador. Isso funciona para isolamento de dados.
+- **Escalabilidade (Grave):** O uso de `whatsapp-web.js` (baseado em Puppeteer/Chromium) é **inviável** para um sistema multi-tenant na mesma máquina.
+    - *Estimativa:* Cada tenant consome ~300MB-500MB de RAM.
+    - *Limite:* Um servidor com 8GB de RAM suportaria no máximo ~15 clínicas simultâneas antes de travar.
+
+## 3. WhatsApp Manager
+**Status:** ⚠️ Básico
+
+- **Reconexão:** O código trata o evento `disconnected` apenas removendo o cliente do Map. Não há lógica de "auto-reconnect" robusta. Se o WhatsApp cair, a clínica fica offline até reinicialização manual.
+- **QR Code:** O código usa `qrcode-terminal`. Isso imprime o QR no console do servidor. Em produção, isso é inútil, pois o usuário final não tem acesso ao terminal do servidor. O QR code precisa ser exposto via API/WebSocket para o frontend.
+- **Start-up:** Não há rotina para restaurar sessões salvas na pasta `sessions/` ao reiniciar o servidor. O sistema começa "zerado" a cada deploy, exigindo re-scan ou lógica de restauração explícita (que falta no `createClient` ao iniciar).
+
+## 4. Engine Conversacional
+**Status:** ✅ Lógica Correta / ⚠️ Simplificado
+
+- **Regra AUTO/HUMAN:** Implementada corretamente. O bot verifica o status e executa `return` se for HUMAN.
+- **Friction Score:** Campo existe no banco, mas é **ignorado** pelo código. Não há lógica para incrementar esse score ou transbordar para humano automaticamente.
+- **Intent Mock:** A detecção de intenção é via `status === "schedule"`. Funcional para teste, mas frágil para produção.
+
+## 5. Scheduling
+**Status:** ⚠️ Risco Operacional
+
+- **Duplicação de Jobs:** O `node-cron` roda na instância da aplicação. Se você escalar o backend para 2 containers (para aguentar a carga do Puppeteer, por exemplo), o cron rodará em *ambos*, enviando mensagens duplicadas para os pacientes.
+- **Timezone:** O código usa `new Date()` (hora do sistema). Se o servidor estiver em UTC e a clínica no Brasil, os lembretes de "manhã às 08:00" serão enviados no horário errado (ex: 05:00 da manhã ou 11:00 da manhã).
+- **Conflito:** A verificação `count > 0` é funcional para MVP.
+
+## 6. Segurança
+**Status:** 🔴 Crítico
+
+- **Senhas:** O modelo `User` existe, mas não há código de cadastro (Sign Up) implementado, logo não há hashing de senha ativo.
+- **Logs:** `console.log` está imprimindo o objeto `qr` e mensagens.
+- **API:** Como não há rotas, não há autenticação (JWT) protegendo endpoints. Qualquer um com acesso à rede poderia (futuramente) controlar qualquer tenant se não for implementado corretamente.
+
+## 7. Recomendações Prioritárias (Roadmap para Produção)
+
+1.  **Arquitetura WhatsApp (Urgente):**
+    -   Substituir `whatsapp-web.js` por uma API externa (ex: Evolution API, Baileys em worker threads isolados) OU limitar drasticamente o número de tenants por servidor.
+    -   Expor QR Code via API (JSON/Base64) e não no terminal.
+
+2.  **Core do Server:**
+    -   Implementar `http/api/routes.ts`.
+    -   Instanciar `WhatsAppManager` no startup do `server.ts`.
+    -   Restaurar sessões existentes ao bootar.
+
+3.  **Segurança:**
+    -   Implementar Middleware de Auth (JWT).
+    -   Criar rotas de Login/Register com `bcrypt`.
+
+4.  **Resiliência:**
+    -   Mover o CRON para um serviço separado ou usar uma flag de "Leader Election" (ex: Redis lock) para evitar duplicação em cluster.
+    -   Configurar Timezone explicitamente (ex: `moment-timezone` ou configuração do env).
+
+## 8. Conclusão
+
+O projeto atual é um **esqueleto funcional** de lógica de negócios, mas **não é um sistema rodável**. Ele contém as peças (modelos, serviços), mas falta a "cola" (API, Inicialização) e a infraestrutura necessária para suportar múltiplos clientes WhatsApp sem colapso de memória.
+
+**Nota:** 2/10
+
+
+
+============================================================
+FILE: audit_report_refactor.md
+============================================================
+# Relatório de Auditoria Técnica - Pós-Refatoração
+
+**Data:** 10/02/2026
+**Arquitetura:** Provider Pattern (Evolution API)
+**Maturidade Arquitetural:** 9/10
+**Prontidão para Produção:** 6/10
+
+## 1. Desacoplamento Arquitetural
+**Status:** ✅ Excelente
+
+- **Injeção de Dependência:** Implementada corretamente em `server.ts`. Nenhum módulo consumidor conhece `EvolutionProvider`.
+- **Interfaces:** `IWhatsAppProvider` define um contrato limpo.
+- **Ciclos:** Não há dependências circulares.
+- **Diagrama de Dependências:**
+    ```mermaid
+    graph TD
+        Server[server.ts] --> EvolutionProvider
+        Server --> WhatsAppService
+        Server --> ConversationEngine
+        Server --> SchedulingService
+        
+        WhatsAppService --> IWhatsAppProvider[Interface]
+        EvolutionProvider ..|> IWhatsAppProvider
+        
+        ConversationEngine --> WhatsAppService
+        SchedulingService --> WhatsAppService
+    ```
+
+## 2. Provider HTTP (EvolutionProvider)
+**Status:** ⚠️ Funcional, mas requer ajustes para Produção
+
+- **Robustez (Nota 7/10):**
+    -   ✅ Usa `axios` corretamente com BaseURL e Headers.
+    -   ✅ Trata erros com `try/catch`.
+    -   ⚠️ **Risco:** `axios` criado sem `timeout`. Se a Evolution API travar (hang), o backend do ClinicOS pode ficar preso aguardando resposta indefinidamente, esgotando conexões.
+    -   ⚠️ **Env Vars:** Usa valores default perigosos (`localhost`, `supersecretkey`). Em produção, deve falhar se as variáveis não existirem.
+
+## 3. Multi-Tenancy
+**Status:** ✅ Seguro
+
+- O `tenantId` é obrigatório em todas as chamadas do Provider.
+- A URL da Evolution é construída dinamicamente com o `tenantId` (`/message/sendText/${tenantId}`), garantindo isolamento de roteamento.
+
+## 4. Engine Conversacional
+**Status:** ⚠️ Falha Lógica Potencial
+
+- **Ordem de Execução:** O código tenta enviar a resposta (`await sendMessage`) **antes** de persistir a mensagem de entrada do usuário (`prisma.message.create`).
+    -   *Cenário de Erro:* Se a Evolution API estiver fora do ar, o `sendMessage` lança exceção. O `catch` captura, mas a mensagem original do usuário **nunca é salva no banco**. O histórico ficará incompleto.
+    -   *Correção:* Persistir a mensagem de entrada *antes* de processar a lógica de resposta.
+
+## 5. Server Initialization
+**Status:** ✅ Correto
+
+- Instanciação única do Provider e dos Serviços.
+- Log de inicialização claro.
+
+## 6. Riscos e Recomendações (Pré-Docker)
+
+### Críticos (Bloqueiam Produção)
+1.  **Logging de Mensagens:** Inverter ordem no `engine.ts` para salvar mensagem recebida antes de processar resposta.
+2.  **Timeout HTTP:** Configurar `timeout: 5000` (5s) no `axios` do Provider.
+3.  **Validação de Env:** Remover valores default de `EVOLUTION_BASE_URL` ou lançar erro se não definidos.
+
+### Melhorias Recomendadas
+1.  **Health Check:** Criar endpoint `/health` em `app.ts` para o Docker verificar se o container está vivo.
+2.  **Shutdown:** Implementar `process.on('SIGTERM')` para fechar conexão do Prisma e servidor Express graciosamente.
+
+## 7. Conclusão
+
+A refatoração foi um sucesso arquitetural. O código agora é modular, testável e desacoplado do Puppeteer. Os riscos restantes são puramente operacionais/lógicos e fáceis de corrigir.
+
+**Nota Final:** 8.5/10
+
+
+
+============================================================
+FILE: debug_env.js
+============================================================
+require('dotenv').config();
+console.log('DATABASE_URL:', process.env.DATABASE_URL);
+
+
+
+============================================================
+FILE: debug_url.js
+============================================================
+try {
+    const url = "mysql://clinicos_user:afK10f[122G1gaoiI@152.67.40.125:5432/clinicosdb";
+    new URL(url);
+    console.log("URL is valid");
+} catch (e) {
+    console.error("URL is invalid:", e.message);
+}
+
+
+
+============================================================
+FILE: docker-compose.yml
+============================================================
+services:
+
+  db:
+    image: postgres:16
+    container_name: clinic_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: clinic_user
+      POSTGRES_PASSWORD: clinic_pass
+      POSTGRES_DB: clinic_os
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - clinic_net
+
+  redis:
+    image: redis:alpine
+    container_name: clinic_redis
+    restart: unless-stopped
+    command: [ "redis-server", "--appendonly", "yes" ]
+    volumes:
+      - redis_data:/data
+    networks:
+      - clinic_net
+
+  evolution:
+    image: atendai/evolution-api:latest
+    container_name: clinic_evolution
+    restart: unless-stopped
+    environment:
+      AUTHENTICATION_API_KEY: supersecretkey
+      SERVER_TYPE: http
+      SERVER_PORT: 8080
+      CORS_ORIGIN: "*"
+
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://clinic_user:clinic_pass@db:5432/clinic_os
+
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379/0
+      CACHE_REDIS_PREFIX: evolution
+
+    ports:
+      - "8080:8080"
+
+    depends_on:
+      - db
+      - redis
+
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "http://localhost:8080" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - clinic_net
+
+  backend:
+    build: .
+    container_name: clinic_backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    depends_on:
+      evolution:
+        condition: service_healthy
+    networks:
+      - clinic_net
+
+volumes:
+  db_data:
+  redis_data:
+
+
+networks:
+  clinic_net:
+    driver: bridge
+
+
+
+============================================================
+FILE: Dockerfile
+============================================================
+# ---------- BUILD STAGE ----------
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+# Gera Prisma Client
+RUN npx prisma generate
+
+# Build TypeScript
+RUN npm run build
+
+
+# ---------- PRODUCTION STAGE ----------
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copia tudo já pronto do builder
+COPY --from=builder /app ./
+
+EXPOSE 3000
+
+CMD ["node", "dist/server.js"]
+
+
+============================================================
+FILE: package.json
+============================================================
+{
+  "name": "clinic-os",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.2.3",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.2",
+    "axios": "^1.13.5",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "node-cron": "^4.2.1",
+    "pg": "^8.18.0",
+    "prisma": "^6.19.2"
+  }
+}
+
+
+
+============================================================
+FILE: README.md
+============================================================
+## Architecture Refactoring (Evolution API)
+
+The backend has been refactored to use the **Provider Pattern** for WhatsApp integration.
+
+- **Legacy Removed:** `whatsapp-web.js` and Puppeteer dependencies have been removed.
+- **New Provider:** `EvolutionProvider` connects to an external Evolution API instance via HTTP.
+- **Service Layer:** `WhatsAppService` wraps the provider, allowing for easy swapping of providers in the future.
+- **Dependency Injection:** `server.ts` handles the wiring of services.
+
+
+## Setup Instructions
+
+1.  **Install Dependencies**
+    ```bash
+    npm install
+    ```
+
+2.  **Environment Variables**
+    Update `.env` with:
+    ```
+    DATABASE_URL="postgresql://USER:PASSWORD@localhost:5432/clinic_os"
+    EVOLUTION_BASE_URL="http://your-evolution-api:8080"
+    EVOLUTION_API_KEY="your-api-key"
+    ```
+
+3.  **Start the Server**
+    ```bash
+    npm run dev
+    ```
+
+## Project Structure
+
+- `src/server.ts`: Entry point with dependency injection.
+- `src/providers/whatsapp`: implementations of `IWhatsAppProvider` (currently `EvolutionProvider`).
+- `src/modules/whatsapp`: Service layer.
+- `src/modules/conversations`: Logic for handling incoming messages.
+- `src/modules/scheduling`: Appointment management.
+
+
+
+
+============================================================
+FILE: tsconfig.json
+============================================================
+{
+    "compilerOptions": {
+        "target": "es2016",
+        "module": "commonjs",
+        "rootDir": "./src",
+        "outDir": "./dist",
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "strict": true,
+        "skipLibCheck": true
+    },
+    "exclude": [
+        "node_modules"
+    ]
+}
+
+
+============================================================
+FILE: prisma\schema.prisma
+============================================================
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model Tenant {
+  id        String         @id @default(uuid())
+  name      String
+  users     User[]
+  conversations Conversation[]
+  appointments Appointment[]
+  createdAt DateTime       @default(now())
+}
+
+model Conversation {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  phone         String
+  status        String   @default("AUTO")
+  frictionScore Int      @default(0)
+  messages      Message[]
+  createdAt     DateTime @default(now())
+}
+
+model Message {
+  id             String   @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  direction      String
+  content        String
+  createdAt      DateTime @default(now())
+}
+
+model Appointment {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  patientName String
+  phone     String
+  date      DateTime
+  status    String   @default("SCHEDULED")
+  createdAt DateTime @default(now())
+}
+
+
+
+============================================================
+FILE: prisma\migrations\migration_lock.toml
+============================================================
+# Please do not edit this file manually
+# It should be added in your version-control system (e.g., Git)
+provider = "postgresql"
+
+
+
+============================================================
+FILE: prisma\migrations\20260210182955_init\migration.sql
+============================================================
+-- CreateTable
+CREATE TABLE "User" (
+    "id" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "password" TEXT NOT NULL,
+    "tenantId" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Tenant" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Tenant_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Conversation" (
+    "id" TEXT NOT NULL,
+    "tenantId" TEXT NOT NULL,
+    "phone" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'AUTO',
+    "frictionScore" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Conversation_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Message" (
+    "id" TEXT NOT NULL,
+    "conversationId" TEXT NOT NULL,
+    "direction" TEXT NOT NULL,
+    "content" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Message_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Appointment" (
+    "id" TEXT NOT NULL,
+    "tenantId" TEXT NOT NULL,
+    "patientName" TEXT NOT NULL,
+    "phone" TEXT NOT NULL,
+    "date" TIMESTAMP(3) NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'SCHEDULED',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Appointment_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
+
+-- AddForeignKey
+ALTER TABLE "User" ADD CONSTRAINT "User_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Conversation" ADD CONSTRAINT "Conversation_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Message" ADD CONSTRAINT "Message_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "Conversation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Appointment" ADD CONSTRAINT "Appointment_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+
+
+============================================================
+FILE: src\app.ts
+============================================================
+import express from "express";
+import cors from "cors";
+
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+app.get("/health", (req, res) => {
+    res.json({
+        status: "ok",
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    });
+});
+
+export default app;
+
+
+
+============================================================
+FILE: src\server.ts
+============================================================
+import app from "./app";
+import { EvolutionProvider } from "./providers/whatsapp/EvolutionProvider";
+import { WhatsAppService } from "./modules/whatsapp/service";
+import { SchedulingService } from "./modules/scheduling/service";
+import { ConversationEngine } from "./modules/conversations/engine";
+import { PrismaClient } from "@prisma/client";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+// 0. Validate Environment
+if (!process.env.EVOLUTION_BASE_URL || !process.env.EVOLUTION_API_KEY) {
+    console.error("FATAL: Missing EVOLUTION_BASE_URL or EVOLUTION_API_KEY in .env");
+    process.exit(1);
+}
+
+// 1. Setup Dependencies
+const whatsappProvider = new EvolutionProvider();
+const whatsappService = new WhatsAppService(whatsappProvider);
+const prisma = new PrismaClient(); // Implicitly used in modules, but good to have a handle for shutdown
+
+// 2. Initialize Modules
+const schedulingService = new SchedulingService(whatsappService);
+const conversationEngine = new ConversationEngine(whatsappService);
+
+
+// 2.1 Test Route for Evolution Integration
+app.get("/test-evolution", async (req, res) => {
+    const tenant = "testclinic";
+
+    try {
+        await whatsappService.createInstance(tenant);
+
+        let qrBase64: string | null = null;
+
+        // Tenta por até 10 segundos
+        for (let i = 0; i < 10; i++) {
+            qrBase64 = await whatsappService.getQRCode(tenant);
+
+            if (qrBase64) break;
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        return res.json({
+            status: "success",
+            qr_code_available: !!qrBase64,
+            qr_base64_preview: qrBase64?.substring(0, 50) ?? null
+        });
+
+    } catch (error) {
+        return res.status(500).json({
+            status: "error",
+            message: "Failed to test Evolution",
+            error: String(error)
+        });
+    }
+});
+
+// 3. Start Server
+const server = app.listen(3000, () => {
+    console.log("Server running on port 3000");
+    console.log("Modules initialized: Scheduling, Conversation Engine");
+});
+
+// 4. Graceful Shutdown
+const shutdown = async () => {
+    console.log("Shutting down gracefully...");
+    server.close(() => {
+        console.log("HTTP server closed.");
+    });
+
+    try {
+        await prisma.$disconnect();
+        console.log("Database disconnected.");
+    } catch (err) {
+        console.error("Error disconnecting database:", err);
+    }
+
+    process.exit(0);
+};
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+
+// Export instances if needed for testing or future routes
+export { whatsappService, schedulingService, conversationEngine };
+
+
+
+============================================================
+FILE: src\modules\ai\classifier.ts
+============================================================
+interface ClassificationResult {
+    intent: string;
+    risk_level: string;
+}
+
+export function classifyMessage(message: string): ClassificationResult {
+    return {
+        intent: "unknown",
+        risk_level: "low"
+    };
+}
+
+
+
+============================================================
+FILE: src\modules\conversations\engine.ts
+============================================================
+import { PrismaClient } from "@prisma/client";
+import { WhatsAppService } from "../whatsapp/service";
+
+const prisma = new PrismaClient();
+
+export class ConversationEngine {
+    constructor(private whatsappService: WhatsAppService) { }
+
+    async handleIncomingMessage(tenantId: string, phone: string, content: string, messageId: string) {
+        try {
+            // 1. Buscar ou criar conversation
+            let conversation = await prisma.conversation.findFirst({
+                where: {
+                    tenantId,
+                    phone
+                }
+            });
+
+            if (!conversation) {
+                conversation = await prisma.conversation.create({
+                    data: {
+                        tenantId,
+                        phone,
+                        status: "AUTO"
+                    }
+                });
+            }
+
+            // 2. CRITICAL: Persist message FIRST
+            await prisma.message.create({
+                data: {
+                    conversationId: conversation.id,
+                    direction: "INBOUND",
+                    content: content
+                }
+            });
+
+            // 3. Se status === "HUMAN" -> retornar
+            if (conversation.status === "HUMAN") {
+                return;
+            }
+
+            // 4. Logic & Response (Protected)
+            try {
+                // Classify intent (mock)
+                const normalizedContent = content.toLowerCase();
+                const intent = normalizedContent.includes("agendar") ? "schedule" : "unknown";
+
+                // Handle intent
+                if (intent === "schedule") {
+                    await this.whatsappService.sendMessage(tenantId, phone, "Para agendar, por favor informe a data e hora desejada.");
+                } else {
+                    await this.whatsappService.sendMessage(tenantId, phone, "Olá! Sou o assistente virtual. Como posso ajudar?");
+                }
+            } catch (logicError) {
+                console.error("Error processing logic/sending response:", logicError);
+                // Message is already saved, so we don't lose data even if logic fails.
+            }
+
+        } catch (error) {
+            console.error("Critical error in ConversationEngine (Data Loss Risk):", error);
+        }
+    }
+}
+
+
+
+============================================================
+FILE: src\modules\scheduling\service.ts
+============================================================
+import { PrismaClient } from "@prisma/client";
+import cron from "node-cron";
+import { WhatsAppService } from "../whatsapp/service";
+
+const prisma = new PrismaClient();
+
+export class SchedulingService {
+    constructor(private whatsappService: WhatsAppService) {
+        this.scheduleDailyReminders();
+    }
+
+    // Jobs
+    private scheduleDailyReminders() {
+        // Todo dia 08:00
+        cron.schedule("0 8 * * *", async () => {
+            console.log("Running daily reminders...");
+            await this.sendDailyReminders();
+        });
+    }
+
+    private async sendDailyReminders() {
+        try {
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            tomorrow.setHours(0, 0, 0, 0);
+
+            const afterTomorrow = new Date(tomorrow);
+            afterTomorrow.setDate(tomorrow.getDate() + 1);
+
+            const appointments = await prisma.appointment.findMany({
+                where: {
+                    date: {
+                        gte: tomorrow,
+                        lt: afterTomorrow
+                    },
+                    status: "SCHEDULED"
+                },
+                include: {
+                    tenant: true
+                }
+            });
+
+            for (const appt of appointments) {
+                const message = `Olá ${appt.patientName}, lembrete de sua consulta amanhã às ${appt.date.getHours()}:${appt.date.getMinutes().toString().padStart(2, '0')}.`;
+                try {
+                    // Simple hygiene for phone number - Evolution usually takes raw numbers or remoteJid
+                    // Assuming Evolution Provider handles formatting if needed, but for now passing as is or basic clean
+                    const phone = appt.phone;
+                    await this.whatsappService.sendMessage(appt.tenantId, phone, message);
+                } catch (error) {
+                    console.error(`Failed to send reminder for appointment ${appt.id}`, error);
+                }
+            }
+        } catch (error) {
+            console.error("Error in sendDailyReminders:", error);
+        }
+    }
+
+    // Service methods
+    async createAppointment(tenantId: string, patientName: string, phone: string, date: Date) {
+        const conflict = await this.checkConflict(tenantId, date);
+        if (conflict) {
+            throw new Error("Horário indisponível");
+        }
+
+        return prisma.appointment.create({
+            data: {
+                tenantId,
+                patientName,
+                phone,
+                date,
+            }
+        });
+    }
+
+    async checkConflict(tenantId: string, date: Date): Promise<boolean> {
+        // Check if there is an appointment within 30 mins window (mock rule)
+        const start = new Date(date);
+        const end = new Date(date.getTime() + 30 * 60000);
+
+        const count = await prisma.appointment.count({
+            where: {
+                tenantId,
+                date: {
+                    gte: start,
+                    lt: end
+                }
+            }
+        });
+
+        return count > 0;
+    }
+
+    async getAppointmentsForTomorrow(tenantId: string) {
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(0, 0, 0, 0);
+
+        const afterTomorrow = new Date(tomorrow);
+        afterTomorrow.setDate(tomorrow.getDate() + 1);
+
+        return prisma.appointment.findMany({
+            where: {
+                tenantId,
+                date: {
+                    gte: tomorrow,
+                    lt: afterTomorrow
+                }
+            }
+        });
+    }
+}
+
+
+
+============================================================
+FILE: src\modules\whatsapp\service.ts
+============================================================
+import { IWhatsAppProvider } from "../../providers/whatsapp/IWhatsAppProvider";
+
+export class WhatsAppService {
+    constructor(private provider: IWhatsAppProvider) { }
+
+    async initializeInstance(tenantId: string) {
+        return this.provider.createInstance(tenantId);
+    }
+
+    async getQRCode(tenantId: string) {
+        return this.provider.getQRCode(tenantId);
+    }
+
+    async sendMessage(tenantId: string, phone: string, content: string) {
+        return this.provider.sendMessage(tenantId, phone, content);
+    }
+
+    async createInstance(tenantId: string) {
+        return this.provider.createInstance(tenantId);
+    }
+
+    async deleteInstance(tenantId: string) {
+        // cast because interface might not have it yet, or update interface tasks
+        // For now, assume IWhatsAppProvider has it or cast
+        if ('deleteInstance' in this.provider) {
+            return (this.provider as any).deleteInstance(tenantId);
+        }
+    }
+
+    // Future: webhook handling could be here or in a controller
+}
+
+
+
+============================================================
+FILE: src\providers\whatsapp\EvolutionProvider.ts
+============================================================
+import axios, { AxiosInstance } from "axios";
+import { IWhatsAppProvider } from "./IWhatsAppProvider";
+
+export class EvolutionProvider implements IWhatsAppProvider {
+    private api: AxiosInstance;
+    private baseUrl: string;
+    private apiKey: string;
+
+    constructor() {
+        this.baseUrl = process.env.EVOLUTION_BASE_URL || "";
+        this.apiKey = process.env.EVOLUTION_API_KEY || "";
+
+        if (!this.baseUrl || !this.apiKey) {
+            console.warn("[EvolutionProvider] Missing EVOLUTION_BASE_URL or EVOLUTION_API_KEY. Provider may not work.");
+        }
+
+        this.api = axios.create({
+            baseURL: this.baseUrl,
+            timeout: 5000, // 5 seconds timeout
+            headers: {
+                "apikey": this.apiKey,
+                "Content-Type": "application/json"
+            }
+        });
+    }
+
+    async createInstance(tenantId: string): Promise<any> {
+        try {
+            console.log(`[EvolutionProvider] Creating instance for ${tenantId}`);
+
+            const response = await this.api.post("/instance", {
+                instanceName: tenantId,
+                integration: "WHATSAPP-BAILEYS"
+            });
+
+            return response.data;
+
+        } catch (error: any) {
+            console.error(`[EvolutionProvider] Error creating instance ${tenantId}:`, error.message);
+            if (error.response) {
+                console.error(`[EvolutionProvider] Response data:`, JSON.stringify(error.response.data));
+                console.error(`[EvolutionProvider] Response status:`, error.response.status);
+            }
+            throw error;
+        }
+    }
+
+    async deleteInstance(tenantId: string): Promise<void> {
+        try {
+            console.log(`[EvolutionProvider] Deleting instance ${tenantId}...`);
+            await this.api.delete(`/instance/delete/${tenantId}`);
+        } catch (error: any) {
+            // Ignore if not found
+        }
+    }
+
+    async getQRCode(tenantId: string): Promise<string | null> {
+        try {
+            console.log(`[EvolutionProvider] Getting QR for ${tenantId}`);
+            console.log(`[EvolutionProvider] Target URL: ${this.baseUrl}/instance/qrcode/${tenantId}`);
+
+            const response = await this.api.get(`/instance/qrcode/${tenantId}`);
+
+            if (response.data?.qrcode?.base64) {
+                return response.data.qrcode.base64;
+            }
+
+            return null;
+        } catch (error: any) {
+            console.error(`[EvolutionProvider] Error getting QR for ${tenantId}:`, error.message);
+            if (error.response) {
+                console.error(`[EvolutionProvider] QR Response data:`, JSON.stringify(error.response.data));
+                console.error(`[EvolutionProvider] QR Response status:`, error.response.status);
+            }
+            return null;
+        }
+    }
+
+    async sendMessage(tenantId: string, phone: string, message: string): Promise<any> {
+        try {
+            // Evolution uses remoteId@s.whatsapp.net usually
+            // Ensure phone is just numbers
+            const number = phone.replace(/\D/g, "");
+
+            const response = await this.api.post(`/message/sendText/${tenantId}`, {
+                number: number,
+                options: {
+                    delay: 1200,
+                    presence: "composing",
+                },
+                textMessage: {
+                    text: message
+                }
+            });
+            return response.data;
+        } catch (error: any) {
+            console.error(`[EvolutionProvider] Error sending message to ${phone} via ${tenantId}:`, error.message);
+            throw error;
+        }
+    }
+
+    async setWebhook(tenantId: string, url: string): Promise<void> {
+        try {
+            await this.api.post(`/webhook/set/${tenantId}`, {
+                webhookUrl: url,
+                webhookByEvents: true,
+                events: ["MESSAGES_UPSERT"]
+            });
+        } catch (error: any) {
+            console.error(`[EvolutionProvider] Error setting webhook for ${tenantId}:`, error.message);
+        }
+    }
+}
+
+
+
+============================================================
+FILE: src\providers\whatsapp\IWhatsAppProvider.ts
+============================================================
+export interface IWhatsAppProvider {
+    createInstance(tenantId: string): Promise<any>;
+    getQRCode(tenantId: string): Promise<string | null>;
+    sendMessage(tenantId: string, phone: string, message: string): Promise<any>;
+    setWebhook(tenantId: string, url: string): Promise<void>;
+}
+
+
+
+============================================================
+FILE: tmp_prisma\schema.prisma
+============================================================
+datasource db {
+  provider = "sqlite"
+  url      = "file:./test.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Test {
+  id Int @id @default(autoincrement())
+}
+
+
