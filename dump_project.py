@@ -18,7 +18,7 @@ ignore_dirs = {
 # Arquivos específicos para ignorar
 ignore_files = {
     'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 
-    '.env', '.env.local', '.env.development', '.env.test', '.env.production',
+    '.env', '.env.docker', '.env.development', '.env.test', '.env.production',
     '.DS_Store', 'Thumbs.db', output_filename, os.path.basename(__file__)
 }
 

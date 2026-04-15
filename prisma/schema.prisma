@@ -34,15 +34,23 @@ model Conversation {
   frictionScore Int      @default(0)
   messages      Message[]
   createdAt     DateTime @default(now())
+
+  @@index([tenantId, phone])
 }
 
 model Message {
   id             String   @id @default(uuid())
+  externalId     String?  @unique
+  outboundId     String?  @unique
   conversationId String
   conversation   Conversation @relation(fields: [conversationId], references: [id])
   direction      String
   content        String
   createdAt      DateTime @default(now())
+
+  @@index([conversationId])
+  @@index([externalId])
+  @@index([createdAt])
 }
 
 model Appointment {
@@ -54,4 +62,15 @@ model Appointment {
   date      DateTime
   status    String   @default("SCHEDULED")
   createdAt DateTime @default(now())
+}
+
+model Log {
+  id        String   @id @default(uuid())
+  level     String
+  message   String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([level])
+  @@index([createdAt])
 }
