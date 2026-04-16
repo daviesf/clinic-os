@@ -10,7 +10,7 @@ export const prisma = basePrisma.$extends({
         const start = Date.now();
         const result = await query(args);
         const durationMs = Date.now() - start;
-        logger.info({ msg: "db_query", model, operation, durationMs });
+        logger.debug({ msg: "db_query", model, operation, durationMs });
         return result;
       },
     },

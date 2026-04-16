@@ -17,12 +17,13 @@ model User {
 }
 
 model Tenant {
-  id        String         @id @default(uuid())
-  name      String
-  users     User[]
+  id            String         @id @default(uuid())
+  phoneNumberId String?        @unique
+  name          String
+  users         User[]
   conversations Conversation[]
-  appointments Appointment[]
-  createdAt DateTime       @default(now())
+  appointments  Appointment[]
+  createdAt     DateTime       @default(now())
 }
 
 model Conversation {
@@ -62,6 +63,8 @@ model Appointment {
   date      DateTime
   status    String   @default("SCHEDULED")
   createdAt DateTime @default(now())
+
+  @@index([tenantId, date])
 }
 
 model Log {

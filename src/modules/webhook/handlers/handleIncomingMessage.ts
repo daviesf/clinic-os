@@ -24,21 +24,23 @@ export async function handleIncomingMessage(value: any) {
   const messageId: string = message.id;
   const phone: string = message.from;
   const text: string = message.text.body;
-  const tenantId = "default";
+  const phoneNumberId = value.metadata?.phone_number_id;
 
-  // Idempotency Check
-  const existingMessage = await prisma.message.findUnique({
-    where: { externalId: messageId },
-  });
-
-  if (existingMessage) {
-    logger.debug({
-      event: "message.duplicate",
-      messageId,
-      phone,
-    });
+  if (!phoneNumberId) {
+    logger.warn({ event: "missing_phone_number_id", value });
     return;
   }
+
+  const tenant = await prisma.tenant.findUnique({
+    where: { phoneNumberId }
+  });
+
+  if (!tenant) {
+    logger.warn({ event: "tenant_not_found", phoneNumberId });
+    return;
+  }
+
+  const tenantId = tenant.id;
 
   const context: RequestContext = {
     requestId,

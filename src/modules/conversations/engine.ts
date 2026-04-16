@@ -1,15 +1,16 @@
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { logger } from "../../lib/logger";
 import { WhatsAppService } from "../whatsapp/service";
+import { PromptService } from "../ai/promptService";
 
-// Simple in-memory rate limiter per phone: max 5 messages per 10s
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 
 function checkRateLimit(phone: string): boolean {
   const now = Date.now();
   const limitWindowMs = 10000;
-  const maxMessages = 5;
+  const maxMessages = 15;
 
   let record = rateLimitMap.get(phone);
   if (!record || now > record.resetAt) {
@@ -22,7 +23,10 @@ function checkRateLimit(phone: string): boolean {
 }
 
 export class ConversationEngine {
-  constructor(private whatsappService: WhatsAppService) {}
+  constructor(
+    private whatsappService: WhatsAppService,
+    private promptService: PromptService,
+  ) {}
 
   async handleIncomingMessage(
     tenantId: string,
@@ -33,159 +37,128 @@ export class ConversationEngine {
     const start = Date.now();
 
     try {
-      // Input validation
-      if (!phone || !content) {
-        logger.warn({
-          msg: "invalid_input_data",
-          phone: phone || null,
-          content: content || null,
-        });
-        return;
-      }
+      if (!phone || !content) return;
+      if (!checkRateLimit(phone)) return;
 
-      // Rate limit check
-      if (!checkRateLimit(phone)) {
-        logger.warn({
-          msg: "rate_limit_exceeded",
-          phone,
-        });
-        return;
-      }
+      // 1. Message received
+      logger.info({
+        event: "message.received",
+        content,
+      });
 
-      // 1. Idempotency check — reject duplicate messages
-      if (messageId) {
-        const exists = await prisma.message.findUnique({
-          where: { externalId: messageId },
-        });
-
-        if (exists) {
-          logger.warn({
-            msg: "duplicate_message",
-            messageId,
-          });
-          return;
-        }
-      }
-
-      // 2. Find or create conversation
       let conversation = await prisma.conversation.findFirst({
-        where: {
-          tenantId,
-          phone,
-        },
+        where: { tenantId, phone },
       });
 
       if (!conversation) {
         conversation = await prisma.conversation.create({
-          data: {
-            tenantId,
-            phone,
-            status: "AUTO",
-          },
-        });
-
-        logger.info({
-          msg: "conversation_created",
-          conversationId: conversation.id,
+          data: { tenantId, phone, status: "AUTO" },
         });
       }
 
-      // 3. CRITICAL: Persist message FIRST
-      await prisma.message.create({
-        data: {
-          conversationId: conversation.id,
-          direction: "INBOUND",
-          content: content,
-          externalId: messageId || null,
-        },
-      });
+      try {
+        await prisma.message.create({
+          data: {
+            conversationId: conversation.id,
+            direction: "INBOUND",
+            content,
+            externalId: messageId || null,
+          },
+        });
+      } catch (error) {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === "P2002"
+        ) {
+          return;
+        }
+        throw error;
+      }
 
+      // 2. Message persisted
       logger.info({
-        msg: "message_persisted",
+        event: "message.persisted",
         conversationId: conversation.id,
       });
 
-      // 4. If status === "HUMAN" -> return
-      if (conversation.status === "HUMAN") {
-        logger.info({
-          msg: "human_mode_skip",
-          conversationId: conversation.id,
-        });
-        return;
+      const action = conversation.status as "AUTO" | "SUGGESTION" | "HUMAN";
+
+      // 3. Decision
+      logger.info({
+        event: "message.action",
+        action,
+      });
+
+      if (action === "HUMAN") {
+        return { action };
       }
 
-      // 5. Logic & Response (Protected)
-      try {
-        // Classify intent (mock)
-        const normalizedContent = content.toLowerCase();
-        const intent = normalizedContent.includes("agendar")
-          ? "schedule"
-          : "unknown";
+      // Classify intent
+      const normalizedContent = content.toLowerCase();
+      const intent = normalizedContent.includes("agendar")
+        ? "schedule"
+        : "unknown";
+      const priority = "normal";
 
-        // Helper to send and persist outbound message idempotently
-        const sendOutbound = async (replyContent: string) => {
-          // Idempotency: deterministic ID using phone + content + 1 minute window
-          const windowMinutes = Math.floor(Date.now() / 60000);
-          const hashString = `${phone}-${replyContent}-${windowMinutes}`;
-          const outboundId = crypto
-            .createHash("sha256")
-            .update(hashString)
-            .digest("hex");
+      // 4. Classification
+      logger.info({
+        event: "message.classified",
+        intent,
+        priority,
+      });
 
-          const exists = await prisma.message.findUnique({
-            where: { outboundId },
-          });
-
-          if (exists) {
-            logger.warn({
-              msg: "duplicate_outbound_prevented",
-              phone,
-              outboundId,
-            });
-            return;
-          }
-
-          // Send message
-          await this.whatsappService.sendMessage(phone, replyContent);
-
-          // Persist outbound status
-          await prisma.message.create({
-            data: {
-              conversationId: conversation.id,
-              direction: "OUTBOUND",
-              content: replyContent,
-              outboundId,
-            },
-          });
-        };
-
-        // Handle intent
-        if (intent === "schedule") {
-          await sendOutbound(
-            "Para agendar, por favor informe a data e hora desejada.",
-          );
-        } else {
-          await sendOutbound(
-            "Olá! Sou o assistente virtual. Como posso ajudar?",
-          );
-        }
-      } catch (logicError) {
-        logger.error({
-          msg: "logic_error",
-          error: logicError,
-          conversationId: conversation.id,
-        });
-        // Message is already saved, so we don't lose data even if logic fails.
+      let responseText = "";
+      if (intent === "schedule") {
+        responseText =
+          "Para agendar, por favor informe a data e hora desejada.";
+      } else {
+        responseText = "Olá! Sou o assistente virtual. Como posso ajudar?";
       }
+
+      // 5. Response
+      logger.info({
+        event: "message.response",
+        response: responseText,
+      });
+
+      const windowMinutes = Math.floor(Date.now() / 60000);
+      const hashString = `${phone}-${responseText}-${windowMinutes}`;
+      const outboundId = crypto
+        .createHash("sha256")
+        .update(hashString)
+        .digest("hex");
+
+      const exists = await prisma.message.findUnique({
+        where: { outboundId },
+      });
+
+      if (!exists) {
+        await this.whatsappService.sendMessage(phone, responseText);
+        await prisma.message.create({
+          data: {
+            conversationId: conversation.id,
+            direction: "OUTBOUND",
+            content: responseText,
+            outboundId,
+          },
+        });
+      }
+
+      return {
+        response: responseText,
+        action,
+        intent,
+      };
     } catch (error) {
       logger.error({
-        msg: "critical_engine_error",
+        event: "message.error",
         error,
       });
     } finally {
       const durationMs = Date.now() - start;
+      // 6. Done
       logger.info({
-        msg: "message_processed",
+        event: "message.done",
         durationMs,
       });
     }

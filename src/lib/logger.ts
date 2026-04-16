@@ -13,8 +13,6 @@ const baseLogger = pino({
             translateTime: "HH:MM:ss Z",
             ignore: "pid,hostname",
             singleLine: false,
-            errorLikeObjectKeys: ["error"],
-            messageFormat: "{event}",
           },
         }
       : undefined,
@@ -95,29 +93,25 @@ function persistErrorLog(
 export const logger = {
   info(obj: Record<string, any>): void {
     const data = injectContext(obj);
-    const event = data.event;
-    baseLogger.info({ ...data, event });
+    baseLogger.info(data);
   },
 
   warn(obj: Record<string, any>): void {
     const data = injectContext(obj);
     if (data.error) data.error = serializeError(data.error);
-    const event = data.event;
-    baseLogger.warn({ ...data, event });
-    persistErrorLog("warn", data, event);
+    baseLogger.warn(data);
+    persistErrorLog("warn", data, data.event);
   },
 
   error(obj: Record<string, any>): void {
     const data = injectContext(obj);
     if (data.error) data.error = serializeError(data.error);
-    const event = data.event;
-    baseLogger.error({ ...data, event });
-    persistErrorLog("error", data, event);
+    baseLogger.error(data);
+    persistErrorLog("error", data, data.event);
   },
 
   debug(obj: Record<string, any>): void {
     const data = injectContext(obj);
-    const event = data.event;
-    baseLogger.debug({ ...data, event });
+    baseLogger.debug(data);
   },
 };
