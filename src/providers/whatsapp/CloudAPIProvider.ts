@@ -1,4 +1,4 @@
-import { IWhatsAppProvider } from "./IWhatsAppProvider";
+import { IWhatsAppProvider, OutboundMessage } from "./IWhatsAppProvider";
 import { env } from "../../config/env";
 import { logger } from "../../lib/logger";
 
@@ -18,8 +18,8 @@ export class CloudAPIProvider implements IWhatsAppProvider {
       process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v25.0";
   }
 
-  async sendMessage(phone: string, message: string) {
-    const number = phone.replace(/\D/g, "");
+  async sendMessage(payload: OutboundMessage) {
+    const number = payload.to.replace(/\D/g, "");
     const url = `${this.apiUrl}/${this.phoneNumberId}/messages`;
 
     const headers = {
@@ -27,14 +27,27 @@ export class CloudAPIProvider implements IWhatsAppProvider {
       "Content-Type": "application/json",
     };
 
-    const body = JSON.stringify({
+    let bodyObj: any = {
       messaging_product: "whatsapp",
       to: number,
-      type: "text",
-      text: {
-        body: message,
-      },
-    });
+    };
+
+    if (payload.type === "text") {
+      bodyObj.type = "text";
+      bodyObj.text = { body: payload.text };
+    } else if (payload.type === "reply") {
+      bodyObj.type = "text";
+      bodyObj.text = { body: payload.text };
+      bodyObj.context = { message_id: payload.replyToMessageId };
+    } else if (payload.type === "audio") {
+      bodyObj.type = "audio";
+      bodyObj.audio = { link: payload.url };
+    } else if (payload.type === "media") {
+      bodyObj.type = "image";
+      bodyObj.image = { link: payload.url, caption: payload.caption };
+    }
+
+    const body = JSON.stringify(bodyObj);
 
     let lastError: unknown;
 

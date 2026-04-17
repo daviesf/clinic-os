@@ -7,21 +7,22 @@ export async function handleStatus(value: any) {
   const requestId = value.requestId; // Expected to be injected by webhookHandler
 
   if (status.status === "failed") {
-    logger.error({ 
-      event: "whatsapp.failed", 
+    logger.error({
+      event: "whatsapp.failed",
       requestId,
       status: status.status,
       messageId: status.id,
       recipient: status.recipient_id,
-      errors: status.errors ?? null
+      errors: status.errors ?? null,
     });
   } else {
-    logger.info({ 
-      event: "whatsapp.status", 
+    ("");
+    logger.info({
+      event: "whatsapp.status",
       requestId,
       status: status.status,
       messageId: status.id,
-      recipient: status.recipient_id 
+      recipient: status.recipient_id,
     });
   }
 }

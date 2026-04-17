@@ -1,8 +1,12 @@
-import { IWhatsAppProvider } from "./IWhatsAppProvider";
+import { IWhatsAppProvider, OutboundMessage } from "./IWhatsAppProvider";
+import { logger } from "../../lib/logger";
 
 export class MockWhatsAppProvider implements IWhatsAppProvider {
-  async sendMessage(to: string, message: string) {
-    console.log("📤 MOCK SEND:", { to, message });
-    return { mockMessageId: "mock-id-1234" };
+  async sendMessage(payload: OutboundMessage) {
+    logger.info({
+      msg: "mock_whatsapp_message_sent",
+      payload,
+    });
+    return { status: "ok" };
   }
 }

@@ -7,6 +7,19 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Enums
+
+enum ConversationStatus {
+  AUTO
+  SUGGESTION
+  HUMAN
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
 model User {
   id        String   @id @default(uuid())
   email     String   @unique
@@ -31,7 +44,7 @@ model Conversation {
   tenantId      String
   tenant        Tenant   @relation(fields: [tenantId], references: [id])
   phone         String
-  status        String   @default("AUTO")
+  status        ConversationStatus @default(AUTO)
   frictionScore Int      @default(0)
   messages      Message[]
   createdAt     DateTime @default(now())
@@ -45,8 +58,9 @@ model Message {
   outboundId     String?  @unique
   conversationId String
   conversation   Conversation @relation(fields: [conversationId], references: [id])
-  direction      String
+  direction      MessageDirection
   content        String
+  status         String   @default("SENT") // PENDING, SENT, FAILED
   createdAt      DateTime @default(now())
 
   @@index([conversationId])

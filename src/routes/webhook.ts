@@ -1,11 +1,11 @@
 import { Router } from "express";
-import { webhookHandler } from "../modules/webhook/webhookHandler";
-import { logger } from "../lib/logger";
+import { WebhookController } from "../modules/webhook/WebhookController";
 import { env } from "../config/env";
 
-const router = Router();
+export function buildWebhookRoutes(controller: WebhookController): Router {
+  const router = Router();
 
-router.get("/webhook", (req, res) => {
+  router.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
@@ -17,18 +17,7 @@ router.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-router.post("/webhook", (req, res) => {
-  const value = req.body?.entry?.[0]?.changes?.[0]?.value;
+  router.post("/webhook", (req, res) => controller.handle(req, res));
 
-  // 1. Respond immediately
-  res.sendStatus(200);
-
-  // 2. Process async (fire-and-forget)
-  if (value) {
-    webhookHandler(value).catch((err) => {
-      logger.error({ msg: "webhook_async_error", error: err });
-    });
-  }
-});
-
-export default router;
+  return router;
+}

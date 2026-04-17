@@ -1,6 +1,13 @@
 import { randomUUID } from "crypto";
-import { webhookHandler } from "../modules/webhook/webhookHandler";
-import { conversationEngine } from "../container";
+import { ConversationService } from "../modules/conversations/ConversationService";
+import { MessageService } from "../modules/conversations/MessageService";
+import { IntentService } from "../modules/conversations/IntentService";
+import { ConversationFlowService } from "../modules/conversations/ConversationFlowService";
+import { ResponseService } from "../modules/conversations/ResponseService";
+import { PrismaConversationRepository, PrismaMessageRepository } from "../infrastructure/persistence/PrismaRepositories";
+import { RedisRateLimiter } from "../infrastructure/redis/RedisRateLimiter";
+import { ConversationStateService } from "../domain/conversation/ConversationStateService";
+import { ConversationStatus } from "../modules/conversations/types";
 import { logger } from "../lib/logger";
 import { prisma } from "../lib/prisma";
 
@@ -37,21 +44,38 @@ async function simulate() {
   // but for simulation we might want to call the engine directly to get the response.
   // Wait, if webhookHandler doesn't return the response, we can directly call the engine here for simulation
   // since the prompt instructs to 'Add clear output: Incoming... Response...'.
-  // However, handleIncomingMessage needs tenantId. We fetched it above.
+  const conversationRepo = new PrismaConversationRepository(prisma);
+  const messageRepo = new PrismaMessageRepository(prisma);
+  const rateLimiter = new RedisRateLimiter();
+  const stateService = new ConversationStateService(conversationRepo);
   
+  const conversationService = new ConversationService(conversationRepo);
+  const messageService = new MessageService(messageRepo);
+  const intentService = new IntentService();
+  const flowService = new ConversationFlowService(stateService);
+  const responseService = new ResponseService();
+
   console.log(`\n📩 Incoming: ${messageText}`);
 
-  const engineResponse = await conversationEngine.handleIncomingMessage(
-    tenant.id,
-    phone,
-    messageText,
-    `wamid.mock.${randomUUID()}`
-  );
+  if (!(await rateLimiter.checkLimit(phone))) return;
 
-  if (engineResponse && engineResponse.response) {
-    console.log(`🤖 Response: ${engineResponse.response}\n`);
+  const conversation = await conversationService.getOrCreate(tenant.id, phone);
+  const wamid = `wamid.mock.${randomUUID()}`;
+
+  const saved = await messageService.saveInbound(conversation.id, messageText, wamid);
+  if (!saved) return;
+
+  const classification = intentService.classify(messageText, tenant.id);
+  const flowDecision = await flowService.decide(conversation, classification);
+
+  if (flowDecision.action === ConversationStatus.HUMAN) {
+    console.log(`🤖 Action taken: HUMAN\n`);
   } else {
-    console.log(`🤖 Action taken: ${engineResponse?.action || 'None'}\n`);
+    const responseText = await responseService.generate(classification.intent, tenant.id, phone, messageText);
+    const hashString = `${phone}-${responseText}-${Math.floor(Date.now() / 60000)}`;
+    const outboundId = randomUUID();
+    await messageService.saveOutbound(conversation.id, responseText, outboundId, phone);
+    console.log(`🤖 Response: ${responseText}\n`);
   }
 }
 

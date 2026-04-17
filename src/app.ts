@@ -1,9 +1,9 @@
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
-import webhookRoutes from "./routes/webhook";
 import { logger } from "./lib/logger";
 
-const app = express();
+export function buildApp(webhookRoutes: express.Router) {
+  const app = express();
 
 app.use(cors());
 app.use(express.json());
@@ -31,5 +31,5 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
     error: "Internal Server Error",
   });
 });
-
-export default app;
+  return app;
+}

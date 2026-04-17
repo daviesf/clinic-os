@@ -1,9 +1,9 @@
-import { IWhatsAppProvider } from "../../providers/whatsapp/IWhatsAppProvider";
+import { IWhatsAppProvider, OutboundMessage } from "../../providers/whatsapp/IWhatsAppProvider";
 
 export class WhatsAppService {
   constructor(private provider: IWhatsAppProvider) {}
 
-  async sendMessage(phone: string, content: string) {
-    return this.provider.sendMessage(phone, content);
+  async sendMessage(payload: OutboundMessage) {
+    return this.provider.sendMessage(payload);
   }
 }

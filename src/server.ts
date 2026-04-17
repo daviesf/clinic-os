@@ -1,39 +1,118 @@
 import "dotenv/config";
 
-import app from "./app";
+import { buildApp } from "./app";
 import { prisma } from "./lib/prisma";
 import { logger } from "./lib/logger";
-import { conversationEngine, schedulingService } from "./container";
 
-// start server
-const PORT = process.env.PORT || 3000;
+// Repositories
+import {
+  PrismaConversationRepository,
+  PrismaMessageRepository,
+  PrismaTenantRepository,
+  PrismaAppointmentRepository,
+  PrismaLogRepository
+} from "./infrastructure/persistence/PrismaRepositories";
+import { RedisRateLimiter } from "./infrastructure/redis/RedisRateLimiter";
 
-const server = app.listen(PORT, () => {
-  logger.info({ msg: "clinicos_running", port: PORT });
-});
+// Services and Domain
+import { CloudAPIProvider } from "./providers/whatsapp/CloudAPIProvider";
+import { MockWhatsAppProvider } from "./providers/whatsapp/MockWhatsAppProvider";
+import { WhatsAppService } from "./modules/whatsapp/service";
+import { SchedulingService } from "./modules/scheduling/service";
+import { ConversationService } from "./modules/conversations/ConversationService";
+import { MessageService } from "./modules/conversations/MessageService";
+import { IntentService } from "./modules/conversations/IntentService";
+import { ConversationFlowService } from "./modules/conversations/ConversationFlowService";
+import { ResponseService } from "./modules/conversations/ResponseService";
+import { PromptService } from "./modules/ai/promptService";
 
-const shutdown = async () => {
-  logger.info({ msg: "shutting_down" });
+// Use cases & Http
+import { ProcessIncomingMessageUseCase } from "./application/useCases/ProcessIncomingMessageUseCase";
+import { WebhookController } from "./modules/webhook/WebhookController";
+import { buildWebhookRoutes } from "./routes/webhook";
+import { startIncomingMessageWorker, startOutboundMessageWorker } from "./application/workers/messageWorker";
+import { ConversationStateService } from "./domain/conversation/ConversationStateService";
+import { startCronJobs } from "./interfaces/cron/scheduler";
 
-  server.close(() => {
-    logger.info({ msg: "http_server_closed" });
+async function bootstrap() {
+  const whatsappProvider = process.env.NODE_ENV === "production" 
+    ? new CloudAPIProvider() 
+    : new MockWhatsAppProvider();
+
+  const whatsappService = new WhatsAppService(whatsappProvider);
+  const promptService = new PromptService();
+
+  const conversationRepo = new PrismaConversationRepository(prisma);
+  const messageRepo = new PrismaMessageRepository(prisma);
+  const tenantRepo = new PrismaTenantRepository(prisma);
+  const appointmentRepo = new PrismaAppointmentRepository(prisma);
+  const logRepo = new PrismaLogRepository(prisma);
+  const rateLimiter = new RedisRateLimiter();
+  const stateService = new ConversationStateService(conversationRepo);
+
+  const schedulingService = new SchedulingService(whatsappService, appointmentRepo, logRepo);
+  
+  const conversationService = new ConversationService(conversationRepo);
+  const messageService = new MessageService(messageRepo);
+  const intentService = new IntentService();
+  const flowService = new ConversationFlowService(stateService);
+  const responseService = new ResponseService();
+
+  const processMessageUseCase = new ProcessIncomingMessageUseCase(
+    tenantRepo,
+    rateLimiter,
+    conversationService,
+    messageService,
+    intentService,
+    flowService,
+    responseService
+  );
+  const webhookController = new WebhookController();
+  
+  // Start Queue Workers
+  startIncomingMessageWorker(processMessageUseCase);
+  startOutboundMessageWorker(messageRepo, whatsappService);
+
+  // Start crons
+  startCronJobs(schedulingService, logRepo);
+
+  const webhookRoutes = buildWebhookRoutes(webhookController);
+  const app = buildApp(webhookRoutes);
+
+  // start server
+  const PORT = process.env.PORT || 3000;
+
+  const server = app.listen(PORT, () => {
+    logger.info({ msg: "clinicos_running", port: PORT });
   });
 
-  await prisma.$disconnect();
-  logger.info({ msg: "database_disconnected" });
+  const shutdown = async () => {
+    logger.info({ msg: "shutting_down" });
 
-  process.exit(0);
-};
+    server.close(() => {
+      logger.info({ msg: "http_server_closed" });
+    });
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+    await prisma.$disconnect();
+    logger.info({ msg: "database_disconnected" });
 
-// Safety: catch unhandled rejections
-process.on("unhandledRejection", (reason) => {
-  logger.error({ msg: "unhandled_rejection", error: reason });
-});
+    process.exit(0);
+  };
 
-process.on("uncaughtException", (error) => {
-  logger.error({ msg: "uncaught_exception", error });
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  process.on("unhandledRejection", (reason) => {
+    logger.error({ msg: "unhandled_rejection", error: reason });
+  });
+
+  process.on("uncaughtException", (error) => {
+    logger.error({ msg: "uncaught_exception", error });
+    process.exit(1);
+  });
+}
+
+bootstrap().catch(err => {
+  logger.error({ msg: "bootstrap_failed", error: err });
   process.exit(1);
 });

@@ -443,10 +443,12 @@ FILE: package.json
     "@prisma/client": "^6.19.2",
     "@types/pino-pretty": "^4.7.5",
     "bcrypt": "^6.0.0",
+    "bullmq": "^5.74.1",
     "cors": "^2.8.6",
     "cross-env": "^10.1.0",
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
+    "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.3",
     "node-cron": "^4.2.1",
     "pg": "^8.18.0",
@@ -598,89 +600,6 @@ model Test {
 
 
 ============================================================
-FILE: tests/test_evolution.js
-============================================================
-const axios = require('axios');
-
-async function testEvolutionIntegration() {
-    console.log("=== Evolution API Integration Test ===\n");
-
-    const BASE_URL = process.env.EVOLUTION_BASE_URL || "http://localhost:8080";
-    const API_KEY = process.env.EVOLUTION_API_KEY || "supersecretkey";
-    const INSTANCE_NAME = "test_instance_" + Date.now();
-
-    console.log(`Target: ${BASE_URL}`);
-    console.log(`API Key: ${API_KEY.substring(0, 4)}***`);
-    console.log(`Instance: ${INSTANCE_NAME}\n`);
-
-    const api = axios.create({
-        baseURL: BASE_URL,
-        timeout: 30000,
-        headers: {
-            "apikey": API_KEY,
-            "Content-Type": "application/json"
-        }
-    });
-
-    try {
-        // 1. Create Instance
-        console.log("1. Creating instance...");
-        const createRes = await api.post("/instance/create", {
-            instanceName: INSTANCE_NAME,
-            integration: "WHATSAPP-BAILEYS",
-            qrcode: true
-        });
-        console.log("✅ Instance created successfully.");
-        console.log("   Status:", createRes.status);
-        console.log("   Instance:", createRes.data?.instance?.instanceName);
-        console.log("   QR in response:", !!createRes.data?.qrcode?.base64);
-
-        if (createRes.data?.qrcode?.base64) {
-            console.log("   QR preview:", createRes.data.qrcode.base64.substring(0, 60) + "...");
-        }
-
-        // 2. Fetch QR Code via connect endpoint (with delay)
-        console.log("\n2. Waiting 3s then fetching QR Code via /instance/connect...");
-        await new Promise(resolve => setTimeout(resolve, 3000));
-
-        try {
-            const connectRes = await api.get(`/instance/connect/${INSTANCE_NAME}`);
-            if (connectRes.data && connectRes.data.base64) {
-                console.log("✅ QR Code retrieved via connect endpoint.");
-                console.log("   QR preview:", connectRes.data.base64.substring(0, 60) + "...");
-            } else {
-                console.log("⚠️ Connect returned but no QR base64:", JSON.stringify(connectRes.data).substring(0, 200));
-            }
-        } catch (connectErr) {
-            console.log("⚠️ Connect endpoint error (may be expected if already connected):",
-                connectErr.response?.status, connectErr.response?.data);
-        }
-
-        // 3. Cleanup
-        console.log("\n3. Cleanup: Deleting instance...");
-        await api.delete(`/instance/delete/${INSTANCE_NAME}`);
-        console.log("✅ Cleanup successful.");
-
-        console.log("\n=== ALL TESTS PASSED ===");
-
-    } catch (error) {
-        console.error("\n❌ Test Failed!");
-        if (error.response) {
-            console.error(`   Status: ${error.response.status}`);
-            console.error("   Data:", JSON.stringify(error.response.data, null, 2));
-            console.error("   URL:", error.config?.url);
-        } else {
-            console.error("   Error:", error.message);
-        }
-        process.exit(1);
-    }
-}
-
-testEvolutionIntegration();
-
-
-
-============================================================
 FILE: prisma/schema.prisma
 ============================================================
 generator client {
@@ -690,6 +609,19 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// Enums
+
+enum ConversationStatus {
+  AUTO
+  SUGGESTION
+  HUMAN
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
 }
 
 model User {
@@ -716,7 +648,7 @@ model Conversation {
   tenantId      String
   tenant        Tenant   @relation(fields: [tenantId], references: [id])
   phone         String
-  status        String   @default("AUTO")
+  status        ConversationStatus @default(AUTO)
   frictionScore Int      @default(0)
   messages      Message[]
   createdAt     DateTime @default(now())
@@ -730,8 +662,9 @@ model Message {
   outboundId     String?  @unique
   conversationId String
   conversation   Conversation @relation(fields: [conversationId], references: [id])
-  direction      String
+  direction      MessageDirection
   content        String
+  status         String   @default("SENT") // PENDING, SENT, FAILED
   createdAt      DateTime @default(now())
 
   @@index([conversationId])
@@ -918,10 +851,10 @@ FILE: src/app.ts
 ============================================================
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
-import webhookRoutes from "./routes/webhook";
 import { logger } from "./lib/logger";
 
-const app = express();
+export function buildApp(webhookRoutes: express.Router) {
+  const app = express();
 
 app.use(cors());
 app.use(express.json());
@@ -949,32 +882,8 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
     error: "Internal Server Error",
   });
 });
-
-export default app;
-
-
-
-============================================================
-FILE: src/container.ts
-============================================================
-import { CloudAPIProvider } from "./providers/whatsapp/CloudAPIProvider";
-import { MockWhatsAppProvider } from "./providers/whatsapp/MockWhatsAppProvider";
-import { WhatsAppService } from "./modules/whatsapp/service";
-import { SchedulingService } from "./modules/scheduling/service";
-import { ConversationEngine } from "./modules/conversations/engine";
-import { PromptService } from "./modules/ai/promptService";
-
-const whatsappProvider = process.env.NODE_ENV === "production" 
-  ? new CloudAPIProvider() 
-  : new MockWhatsAppProvider();
-
-const whatsappService = new WhatsAppService(whatsappProvider);
-const promptService = new PromptService();
-
-const schedulingService = new SchedulingService(whatsappService);
-const conversationEngine = new ConversationEngine(whatsappService, promptService);
-
-export { whatsappService, schedulingService, conversationEngine };
+  return app;
+}
 
 
 
@@ -983,43 +892,404 @@ FILE: src/server.ts
 ============================================================
 import "dotenv/config";
 
-import app from "./app";
+import { buildApp } from "./app";
 import { prisma } from "./lib/prisma";
 import { logger } from "./lib/logger";
-import { conversationEngine, schedulingService } from "./container";
 
-// start server
-const PORT = process.env.PORT || 3000;
+// Repositories
+import {
+  PrismaConversationRepository,
+  PrismaMessageRepository,
+  PrismaTenantRepository,
+  PrismaAppointmentRepository,
+  PrismaLogRepository
+} from "./infrastructure/persistence/PrismaRepositories";
+import { RedisRateLimiter } from "./infrastructure/redis/RedisRateLimiter";
 
-const server = app.listen(PORT, () => {
-  logger.info({ msg: "clinicos_running", port: PORT });
-});
+// Services and Domain
+import { CloudAPIProvider } from "./providers/whatsapp/CloudAPIProvider";
+import { MockWhatsAppProvider } from "./providers/whatsapp/MockWhatsAppProvider";
+import { WhatsAppService } from "./modules/whatsapp/service";
+import { SchedulingService } from "./modules/scheduling/service";
+import { ConversationService } from "./modules/conversations/ConversationService";
+import { MessageService } from "./modules/conversations/MessageService";
+import { IntentService } from "./modules/conversations/IntentService";
+import { ConversationFlowService } from "./modules/conversations/ConversationFlowService";
+import { ResponseService } from "./modules/conversations/ResponseService";
+import { PromptService } from "./modules/ai/promptService";
 
-const shutdown = async () => {
-  logger.info({ msg: "shutting_down" });
+// Use cases & Http
+import { ProcessIncomingMessageUseCase } from "./application/useCases/ProcessIncomingMessageUseCase";
+import { WebhookController } from "./modules/webhook/WebhookController";
+import { buildWebhookRoutes } from "./routes/webhook";
+import { startIncomingMessageWorker, startOutboundMessageWorker } from "./application/workers/messageWorker";
+import { ConversationStateService } from "./domain/conversation/ConversationStateService";
+import { startCronJobs } from "./interfaces/cron/scheduler";
 
-  server.close(() => {
-    logger.info({ msg: "http_server_closed" });
+async function bootstrap() {
+  const whatsappProvider = process.env.NODE_ENV === "production" 
+    ? new CloudAPIProvider() 
+    : new MockWhatsAppProvider();
+
+  const whatsappService = new WhatsAppService(whatsappProvider);
+  const promptService = new PromptService();
+
+  const conversationRepo = new PrismaConversationRepository(prisma);
+  const messageRepo = new PrismaMessageRepository(prisma);
+  const tenantRepo = new PrismaTenantRepository(prisma);
+  const appointmentRepo = new PrismaAppointmentRepository(prisma);
+  const logRepo = new PrismaLogRepository(prisma);
+  const rateLimiter = new RedisRateLimiter();
+  const stateService = new ConversationStateService(conversationRepo);
+
+  const schedulingService = new SchedulingService(whatsappService, appointmentRepo, logRepo);
+  
+  const conversationService = new ConversationService(conversationRepo);
+  const messageService = new MessageService(messageRepo);
+  const intentService = new IntentService();
+  const flowService = new ConversationFlowService(stateService);
+  const responseService = new ResponseService();
+
+  const processMessageUseCase = new ProcessIncomingMessageUseCase(
+    tenantRepo,
+    rateLimiter,
+    conversationService,
+    messageService,
+    intentService,
+    flowService,
+    responseService
+  );
+  const webhookController = new WebhookController();
+  
+  // Start Queue Workers
+  startIncomingMessageWorker(processMessageUseCase);
+  startOutboundMessageWorker(messageRepo, whatsappService);
+
+  // Start crons
+  startCronJobs(schedulingService, logRepo);
+
+  const webhookRoutes = buildWebhookRoutes(webhookController);
+  const app = buildApp(webhookRoutes);
+
+  // start server
+  const PORT = process.env.PORT || 3000;
+
+  const server = app.listen(PORT, () => {
+    logger.info({ msg: "clinicos_running", port: PORT });
   });
 
-  await prisma.$disconnect();
-  logger.info({ msg: "database_disconnected" });
+  const shutdown = async () => {
+    logger.info({ msg: "shutting_down" });
 
-  process.exit(0);
-};
+    server.close(() => {
+      logger.info({ msg: "http_server_closed" });
+    });
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+    await prisma.$disconnect();
+    logger.info({ msg: "database_disconnected" });
 
-// Safety: catch unhandled rejections
-process.on("unhandledRejection", (reason) => {
-  logger.error({ msg: "unhandled_rejection", error: reason });
-});
+    process.exit(0);
+  };
 
-process.on("uncaughtException", (error) => {
-  logger.error({ msg: "uncaught_exception", error });
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  process.on("unhandledRejection", (reason) => {
+    logger.error({ msg: "unhandled_rejection", error: reason });
+  });
+
+  process.on("uncaughtException", (error) => {
+    logger.error({ msg: "uncaught_exception", error });
+    process.exit(1);
+  });
+}
+
+bootstrap().catch(err => {
+  logger.error({ msg: "bootstrap_failed", error: err });
   process.exit(1);
 });
+
+
+
+============================================================
+FILE: src/application/queues/messageQueue.ts
+============================================================
+import { Queue } from "bullmq";
+import { redisClient } from "../../infrastructure/redis/client";
+
+export const incomingMessageQueue = new Queue("incoming-message", {
+  connection: redisClient,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1000 },
+  },
+});
+
+export const outboundMessageQueue = new Queue("outbound-message", {
+  connection: redisClient,
+  defaultJobOptions: {
+    attempts: 5,
+    backoff: { type: "exponential", delay: 2000 },
+  },
+});
+
+
+
+============================================================
+FILE: src/application/workers/messageWorker.ts
+============================================================
+import { Worker } from "bullmq";
+import { redisClient } from "../../infrastructure/redis/client";
+import { ProcessIncomingMessageUseCase } from "../useCases/ProcessIncomingMessageUseCase";
+import { IMessageRepository } from "../interfaces/repositories";
+import { logger } from "../../lib/logger";
+import { handleStatus } from "../../modules/webhook/handlers/handleStatus";
+
+export function startIncomingMessageWorker(useCase: ProcessIncomingMessageUseCase) {
+  const worker = new Worker("incoming-message", async (job) => {
+    const value = job.data;
+    await handleStatus(value);
+    await useCase.execute(value);
+  }, { connection: redisClient });
+
+  worker.on("failed", (job, err) => {
+    logger.error({ msg: "incoming_message_worker_failed", jobId: job?.id, error: err });
+  });
+
+  return worker;
+}
+
+export function startOutboundMessageWorker(messageRepo: IMessageRepository, whatsappService: any) {
+  const worker = new Worker("outbound-message", async (job) => {
+    const { messageId, phone, content } = job.data;
+
+    try {
+      await whatsappService.sendMessage({ type: "text", to: phone, text: content });
+      await messageRepo.updateStatus(messageId, "SENT");
+    } catch (error) {
+      await messageRepo.updateStatus(messageId, "FAILED");
+      throw error; // Let BullMQ retry based on queue settings
+    }
+  }, { connection: redisClient });
+
+  worker.on("failed", (job, err) => {
+    logger.error({ msg: "outbound_message_worker_failed", jobId: job?.id, error: err });
+  });
+
+  return worker;
+}
+
+
+
+============================================================
+FILE: src/application/interfaces/IRateLimiter.ts
+============================================================
+export interface IRateLimiter {
+  checkLimit(key: string): Promise<boolean>;
+}
+
+
+
+============================================================
+FILE: src/application/interfaces/repositories.ts
+============================================================
+import { Conversation, Message, Tenant, Appointment, Log, Prisma } from "@prisma/client";
+
+export interface IConversationRepository {
+  findByPhone(tenantId: string, phone: string): Promise<Conversation | null>;
+  create(data: { tenantId: string; phone: string; status: any }): Promise<Conversation>;
+  updateStatus(id: string, status: any): Promise<Conversation>;
+}
+
+export interface IMessageRepository {
+  create(data: {
+    conversationId: string;
+    direction: any;
+    content: string;
+    externalId?: string | null;
+    outboundId?: string | null;
+    status?: string;
+  }): Promise<Message>;
+  findByOutboundId(outboundId: string): Promise<Message | null>;
+  updateStatus(id: string, status: string): Promise<Message>;
+}
+
+export interface ITenantRepository {
+  findByPhoneNumberId(phoneNumberId: string): Promise<Tenant | null>;
+}
+
+export interface IAppointmentRepository {
+  findForTomorrow(tenantId?: string): Promise<(Appointment & { tenant?: Tenant })[]>;
+  create(data: { tenantId: string; patientName: string; phone: string; date: Date }): Promise<Appointment>;
+  countConflicts(tenantId: string, start: Date, end: Date): Promise<number>;
+}
+
+export interface ILogRepository {
+  deleteOlderThan(date: Date): Promise<void>;
+}
+
+
+
+
+============================================================
+FILE: src/application/useCases/ProcessIncomingMessageUseCase.ts
+============================================================
+import { logger } from "../../lib/logger";
+import crypto from "crypto";
+import { asyncLocalStorage, RequestContext } from "../../lib/requestContext";
+import { ITenantRepository } from "../interfaces/repositories";
+import { ConversationService } from "../../modules/conversations/ConversationService";
+import { MessageService } from "../../modules/conversations/MessageService";
+import { IntentService } from "../../modules/conversations/IntentService";
+import { ConversationFlowService } from "../../modules/conversations/ConversationFlowService";
+import { ResponseService } from "../../modules/conversations/ResponseService";
+import { IRateLimiter } from "../interfaces/IRateLimiter";
+import { ConversationStatus } from "../../modules/conversations/types";
+
+export class ProcessIncomingMessageUseCase {
+  constructor(
+    private tenantRepo: ITenantRepository,
+    private rateLimiter: IRateLimiter,
+    private conversationService: ConversationService,
+    private messageService: MessageService,
+    private intentService: IntentService,
+    private flowService: ConversationFlowService,
+    private responseService: ResponseService
+  ) {}
+
+  async execute(value: any) {
+    if (!value?.messages || value.messages.length === 0) return;
+
+    const message = value.messages[0];
+    const requestId = value.requestId || "req-" + Date.now();
+
+    if (!message?.text?.body || !message?.from) {
+      logger.warn({
+        event: "message.invalid_payload",
+        requestId,
+        payload: {
+          hasText: !!message.text?.body,
+          from: message.from,
+        },
+      });
+      return;
+    }
+
+    const messageId: string = message.id;
+    const phone: string = message.from;
+    const text: string = message.text.body;
+    const phoneNumberId = value.metadata?.phone_number_id;
+
+    if (!phoneNumberId) {
+      logger.warn({ event: "missing_phone_number_id", value });
+      return;
+    }
+
+    const tenant = await this.tenantRepo.findByPhoneNumberId(phoneNumberId);
+
+    if (!tenant) {
+      logger.warn({ event: "tenant_not_found", phoneNumberId });
+      return;
+    }
+
+    const tenantId = tenant.id;
+
+    const context: RequestContext = {
+      requestId,
+      messageId,
+      phone,
+      tenantId,
+    };
+
+    await asyncLocalStorage.run(context, async () => {
+      const start = Date.now();
+      try {
+        if (!(await this.rateLimiter.checkLimit(phone))) return;
+
+        logger.info({
+          event: "message.received",
+          content: text,
+        });
+
+        const conversation = await this.conversationService.getOrCreate(tenantId, phone);
+
+        const saved = await this.messageService.saveInbound(conversation.id, text, messageId);
+        if (!saved) return; // duplicate
+
+        logger.info({
+          event: "message.persisted",
+          conversationId: conversation.id,
+        });
+
+        const currentAction = conversation.status;
+        logger.info({
+          event: "message.action",
+          action: currentAction,
+        });
+
+        if (currentAction === ConversationStatus.HUMAN) {
+           logger.info({
+            event: "message.processed",
+            phone,
+            success: true,
+          });
+          return;
+        }
+
+        const classification = this.intentService.classify(text, tenantId);
+
+        const flowDecision = await this.flowService.decide(conversation, classification);
+
+        logger.info({
+          event: "message.classified",
+          intent: classification.intent,
+          priority: classification.priority,
+          action: flowDecision.action,
+          score: classification.score,
+        });
+
+        // Don't auto-respond if escalated to HUMAN
+        if (flowDecision.action === ConversationStatus.HUMAN) {
+           return;
+        }
+
+        const responseText = await this.responseService.generate(classification.intent, tenantId, phone, text);
+
+        logger.info({
+          event: "message.response",
+          response: responseText,
+        });
+
+        const windowMinutes = Math.floor(Date.now() / 60000);
+        const hashString = `${phone}-${responseText}-${windowMinutes}`;
+        const outboundId = crypto
+          .createHash("sha256")
+          .update(hashString)
+          .digest("hex");
+
+        await this.messageService.saveOutbound(conversation.id, responseText, outboundId, phone);
+
+        logger.info({
+          event: "message.processed",
+          phone,
+          success: true,
+        });
+
+      } catch (error) {
+        logger.error({
+          event: "webhook.error",
+          error,
+        });
+      } finally {
+        const durationMs = Date.now() - start;
+        logger.info({
+          event: "message.done",
+          durationMs,
+        });
+      }
+    });
+  }
+}
 
 
 
@@ -1027,13 +1297,13 @@ process.on("uncaughtException", (error) => {
 FILE: src/routes/webhook.ts
 ============================================================
 import { Router } from "express";
-import { webhookHandler } from "../modules/webhook/webhookHandler";
-import { logger } from "../lib/logger";
+import { WebhookController } from "../modules/webhook/WebhookController";
 import { env } from "../config/env";
 
-const router = Router();
+export function buildWebhookRoutes(controller: WebhookController): Router {
+  const router = Router();
 
-router.get("/webhook", (req, res) => {
+  router.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
@@ -1045,21 +1315,10 @@ router.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-router.post("/webhook", (req, res) => {
-  const value = req.body?.entry?.[0]?.changes?.[0]?.value;
+  router.post("/webhook", (req, res) => controller.handle(req, res));
 
-  // 1. Respond immediately
-  res.sendStatus(200);
-
-  // 2. Process async (fire-and-forget)
-  if (value) {
-    webhookHandler(value).catch((err) => {
-      logger.error({ msg: "webhook_async_error", error: err });
-    });
-  }
-});
-
-export default router;
+  return router;
+}
 
 
 
@@ -1170,7 +1429,6 @@ FILE: src/lib/logger.ts
 ============================================================
 import pino from "pino";
 import { getContext } from "./requestContext";
-import { prisma } from "./prisma";
 
 const baseLogger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -1223,42 +1481,6 @@ function injectContext(obj: Record<string, any>): Record<string, any> {
   };
 }
 
-function persistErrorLog(
-  level: string,
-  data: Record<string, any>,
-  eventStr?: string,
-): void {
-  if (level !== "error" && level !== "warn") return;
-
-  const metadata = { ...data };
-
-  if (metadata.error) {
-    metadata.error = { ...metadata.error };
-    if (
-      typeof metadata.error.stack === "string" &&
-      metadata.error.stack.length > 2000
-    ) {
-      metadata.error.stack =
-        metadata.error.stack.substring(0, 2000) + "... (truncated)";
-    }
-  }
-
-  const message = String(
-    eventStr || metadata.error?.message || "unknown_error",
-  );
-
-  prisma.log
-    .create({
-      data: {
-        level,
-        message,
-        metadata: metadata as any,
-      },
-    })
-    .catch(() => {
-      // Intentionally ignore database errors during logging fallback
-    });
-}
 
 export const logger = {
   info(obj: Record<string, any>): void {
@@ -1270,14 +1492,12 @@ export const logger = {
     const data = injectContext(obj);
     if (data.error) data.error = serializeError(data.error);
     baseLogger.warn(data);
-    persistErrorLog("warn", data, data.event);
   },
 
   error(obj: Record<string, any>): void {
     const data = injectContext(obj);
     if (data.error) data.error = serializeError(data.error);
     baseLogger.error(data);
-    persistErrorLog("error", data, data.event);
   },
 
   debug(obj: Record<string, any>): void {
@@ -1292,8 +1512,15 @@ export const logger = {
 FILE: src/scripts/simulateMessage.ts
 ============================================================
 import { randomUUID } from "crypto";
-import { webhookHandler } from "../modules/webhook/webhookHandler";
-import { conversationEngine } from "../container";
+import { ConversationService } from "../modules/conversations/ConversationService";
+import { MessageService } from "../modules/conversations/MessageService";
+import { IntentService } from "../modules/conversations/IntentService";
+import { ConversationFlowService } from "../modules/conversations/ConversationFlowService";
+import { ResponseService } from "../modules/conversations/ResponseService";
+import { PrismaConversationRepository, PrismaMessageRepository } from "../infrastructure/persistence/PrismaRepositories";
+import { RedisRateLimiter } from "../infrastructure/redis/RedisRateLimiter";
+import { ConversationStateService } from "../domain/conversation/ConversationStateService";
+import { ConversationStatus } from "../modules/conversations/types";
 import { logger } from "../lib/logger";
 import { prisma } from "../lib/prisma";
 
@@ -1330,21 +1557,38 @@ async function simulate() {
   // but for simulation we might want to call the engine directly to get the response.
   // Wait, if webhookHandler doesn't return the response, we can directly call the engine here for simulation
   // since the prompt instructs to 'Add clear output: Incoming... Response...'.
-  // However, handleIncomingMessage needs tenantId. We fetched it above.
+  const conversationRepo = new PrismaConversationRepository(prisma);
+  const messageRepo = new PrismaMessageRepository(prisma);
+  const rateLimiter = new RedisRateLimiter();
+  const stateService = new ConversationStateService(conversationRepo);
   
+  const conversationService = new ConversationService(conversationRepo);
+  const messageService = new MessageService(messageRepo);
+  const intentService = new IntentService();
+  const flowService = new ConversationFlowService(stateService);
+  const responseService = new ResponseService();
+
   console.log(`\n📩 Incoming: ${messageText}`);
 
-  const engineResponse = await conversationEngine.handleIncomingMessage(
-    tenant.id,
-    phone,
-    messageText,
-    `wamid.mock.${randomUUID()}`
-  );
+  if (!(await rateLimiter.checkLimit(phone))) return;
 
-  if (engineResponse && engineResponse.response) {
-    console.log(`🤖 Response: ${engineResponse.response}\n`);
+  const conversation = await conversationService.getOrCreate(tenant.id, phone);
+  const wamid = `wamid.mock.${randomUUID()}`;
+
+  const saved = await messageService.saveInbound(conversation.id, messageText, wamid);
+  if (!saved) return;
+
+  const classification = intentService.classify(messageText, tenant.id);
+  const flowDecision = await flowService.decide(conversation, classification);
+
+  if (flowDecision.action === ConversationStatus.HUMAN) {
+    console.log(`🤖 Action taken: HUMAN\n`);
   } else {
-    console.log(`🤖 Action taken: ${engineResponse?.action || 'None'}\n`);
+    const responseText = await responseService.generate(classification.intent, tenant.id, phone, messageText);
+    const hashString = `${phone}-${responseText}-${Math.floor(Date.now() / 60000)}`;
+    const outboundId = randomUUID();
+    await messageService.saveOutbound(conversation.id, responseText, outboundId, phone);
+    console.log(`🤖 Response: ${responseText}\n`);
   }
 }
 
@@ -1360,7 +1604,15 @@ FILE: src/scripts/chat.ts
 ============================================================
 import readline from "readline";
 import { randomUUID } from "crypto";
-import { conversationEngine } from "../container";
+import { ConversationService } from "../modules/conversations/ConversationService";
+import { MessageService } from "../modules/conversations/MessageService";
+import { IntentService } from "../modules/conversations/IntentService";
+import { ConversationFlowService } from "../modules/conversations/ConversationFlowService";
+import { ResponseService } from "../modules/conversations/ResponseService";
+import { PrismaConversationRepository, PrismaMessageRepository } from "../infrastructure/persistence/PrismaRepositories";
+import { RedisRateLimiter } from "../infrastructure/redis/RedisRateLimiter";
+import { ConversationStateService } from "../domain/conversation/ConversationStateService";
+import { ConversationStatus } from "../modules/conversations/types";
 import { prisma } from "../lib/prisma";
 
 const rl = readline.createInterface({
@@ -1382,6 +1634,17 @@ async function runChat() {
     },
   });
 
+  const conversationRepo = new PrismaConversationRepository(prisma);
+  const messageRepo = new PrismaMessageRepository(prisma);
+  const rateLimiter = new RedisRateLimiter();
+  const stateService = new ConversationStateService(conversationRepo);
+  
+  const conversationService = new ConversationService(conversationRepo);
+  const messageService = new MessageService(messageRepo);
+  const intentService = new IntentService();
+  const flowService = new ConversationFlowService(stateService);
+  const responseService = new ResponseService();
+
   console.log("💬 Chat iniciado (Digite 'sair' para encerrar)\n");
 
   const promptUser = () => {
@@ -1397,17 +1660,25 @@ async function runChat() {
       }
 
       try {
-        const engineResponse = await conversationEngine.handleIncomingMessage(
-          tenant.id,
-          phone,
-          input,
-          `wamid.mock.${randomUUID()}`
-        );
+        if (!(await rateLimiter.checkLimit(phone))) return;
 
-        if (engineResponse && engineResponse.response) {
-          console.log(`🤖 ${engineResponse.response}\n`);
+        const conversation = await conversationService.getOrCreate(tenant.id, phone);
+        const wamid = `wamid.mock.${randomUUID()}`;
+        
+        const saved = await messageService.saveInbound(conversation.id, input, wamid);
+        if (!saved) return;
+
+        const classification = intentService.classify(input, tenant.id);
+        const flowDecision = await flowService.decide(conversation, classification);
+
+        if (flowDecision.action === ConversationStatus.HUMAN) {
+          console.log(`🤖 Ação: HUMAN\n`);
         } else {
-          console.log(`🤖 Ação: ${engineResponse?.action || "None"}\n`);
+          const responseText = await responseService.generate(classification.intent, tenant.id, phone, input);
+          const hashString = `${phone}-${responseText}-${Math.floor(Date.now() / 60000)}`;
+          const outboundId = randomUUID();
+          await messageService.saveOutbound(conversation.id, responseText, outboundId, phone);
+          console.log(`🤖 ${responseText}\n`);
         }
       } catch (error) {
         console.error("Erro no processamento:", error);
@@ -1428,9 +1699,172 @@ runChat().catch((err) => {
 
 
 ============================================================
+FILE: src/infrastructure/persistence/PrismaRepositories.ts
+============================================================
+import { PrismaClient, Conversation, Message, Tenant, Appointment, Log, Prisma } from "@prisma/client";
+import {
+  IConversationRepository,
+  IMessageRepository,
+  ITenantRepository,
+  IAppointmentRepository,
+  ILogRepository
+} from "../../application/interfaces/repositories";
+
+export class PrismaConversationRepository implements IConversationRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async findByPhone(tenantId: string, phone: string): Promise<Conversation | null> {
+    return this.prisma.conversation.findFirst({
+      where: { tenantId, phone },
+    });
+  }
+
+  async create(data: { tenantId: string; phone: string; status: any }): Promise<Conversation> {
+    return this.prisma.conversation.create({
+      data,
+    });
+  }
+
+  async updateStatus(id: string, status: any): Promise<Conversation> {
+    return this.prisma.conversation.update({
+      where: { id },
+      data: { status }
+    });
+  }
+}
+
+export class PrismaMessageRepository implements IMessageRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async create(data: {
+    conversationId: string;
+    direction: any;
+    content: string;
+    externalId?: string | null;
+    outboundId?: string | null;
+    status?: string;
+  }): Promise<Message> {
+    return this.prisma.message.create({
+      data,
+    });
+  }
+
+  async findByOutboundId(outboundId: string): Promise<Message | null> {
+    return this.prisma.message.findUnique({
+      where: { outboundId },
+    });
+  }
+
+  async updateStatus(id: string, status: string): Promise<Message> {
+    return this.prisma.message.update({
+      where: { id },
+      data: { status },
+    });
+  }
+}
+
+export class PrismaTenantRepository implements ITenantRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async findByPhoneNumberId(phoneNumberId: string): Promise<Tenant | null> {
+    return this.prisma.tenant.findUnique({
+      where: { phoneNumberId },
+    });
+  }
+}
+
+export class PrismaAppointmentRepository implements IAppointmentRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async findForTomorrow(tenantId?: string): Promise<(Appointment & { tenant?: Tenant })[]> {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+
+    const afterTomorrow = new Date(tomorrow);
+    afterTomorrow.setDate(tomorrow.getDate() + 1);
+
+    return this.prisma.appointment.findMany({
+      where: {
+        ...(tenantId ? { tenantId } : {}),
+        date: { gte: tomorrow, lt: afterTomorrow },
+        status: "SCHEDULED"
+      },
+      take: 500,
+      include: { tenant: true }
+    });
+  }
+
+  async countConflicts(tenantId: string, start: Date, end: Date): Promise<number> {
+    return this.prisma.appointment.count({
+      where: {
+        tenantId,
+        date: { gte: start, lt: end }
+      }
+    });
+  }
+
+  async create(data: { tenantId: string; patientName: string; phone: string; date: Date }): Promise<Appointment> {
+    return this.prisma.appointment.create({ data });
+  }
+}
+
+export class PrismaLogRepository implements ILogRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async deleteOlderThan(date: Date): Promise<void> {
+    await this.prisma.log.deleteMany({
+      where: { createdAt: { lt: date } }
+    });
+  }
+}
+
+
+
+============================================================
+FILE: src/infrastructure/redis/RedisRateLimiter.ts
+============================================================
+import { IRateLimiter } from "../../application/interfaces/IRateLimiter";
+import { redisClient } from "./client";
+
+export class RedisRateLimiter implements IRateLimiter {
+  private readonly limitWindowMs = 10000;
+  private readonly maxAllowed = 15;
+
+  async checkLimit(key: string): Promise<boolean> {
+    const redisKey = `ratelimit:${key}`;
+    const count = await redisClient.incr(redisKey);
+    
+    if (count === 1) {
+      await redisClient.pexpire(redisKey, this.limitWindowMs);
+    }
+
+    return count <= this.maxAllowed;
+  }
+}
+
+
+
+============================================================
+FILE: src/infrastructure/redis/client.ts
+============================================================
+import { Redis } from "ioredis";
+import { logger } from "../../lib/logger";
+
+export const redisClient = new Redis(process.env.REDIS_URL || "redis://localhost:6379", {
+  maxRetriesPerRequest: null,
+});
+
+redisClient.on("error", (err) => {
+  logger.error({ msg: "redis_error", error: err });
+});
+
+
+
+============================================================
 FILE: src/providers/whatsapp/CloudAPIProvider.ts
 ============================================================
-import { IWhatsAppProvider } from "./IWhatsAppProvider";
+import { IWhatsAppProvider, OutboundMessage } from "./IWhatsAppProvider";
 import { env } from "../../config/env";
 import { logger } from "../../lib/logger";
 
@@ -1450,8 +1884,8 @@ export class CloudAPIProvider implements IWhatsAppProvider {
       process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v25.0";
   }
 
-  async sendMessage(phone: string, message: string) {
-    const number = phone.replace(/\D/g, "");
+  async sendMessage(payload: OutboundMessage) {
+    const number = payload.to.replace(/\D/g, "");
     const url = `${this.apiUrl}/${this.phoneNumberId}/messages`;
 
     const headers = {
@@ -1459,14 +1893,27 @@ export class CloudAPIProvider implements IWhatsAppProvider {
       "Content-Type": "application/json",
     };
 
-    const body = JSON.stringify({
+    let bodyObj: any = {
       messaging_product: "whatsapp",
       to: number,
-      type: "text",
-      text: {
-        body: message,
-      },
-    });
+    };
+
+    if (payload.type === "text") {
+      bodyObj.type = "text";
+      bodyObj.text = { body: payload.text };
+    } else if (payload.type === "reply") {
+      bodyObj.type = "text";
+      bodyObj.text = { body: payload.text };
+      bodyObj.context = { message_id: payload.replyToMessageId };
+    } else if (payload.type === "audio") {
+      bodyObj.type = "audio";
+      bodyObj.audio = { link: payload.url };
+    } else if (payload.type === "media") {
+      bodyObj.type = "image";
+      bodyObj.image = { link: payload.url, caption: payload.caption };
+    }
+
+    const body = JSON.stringify(bodyObj);
 
     let lastError: unknown;
 
@@ -1572,12 +2019,16 @@ export class CloudAPIProvider implements IWhatsAppProvider {
 ============================================================
 FILE: src/providers/whatsapp/MockWhatsAppProvider.ts
 ============================================================
-import { IWhatsAppProvider } from "./IWhatsAppProvider";
+import { IWhatsAppProvider, OutboundMessage } from "./IWhatsAppProvider";
+import { logger } from "../../lib/logger";
 
 export class MockWhatsAppProvider implements IWhatsAppProvider {
-  async sendMessage(to: string, message: string) {
-    console.log("📤 MOCK SEND:", { to, message });
-    return { mockMessageId: "mock-id-1234" };
+  async sendMessage(payload: OutboundMessage) {
+    logger.info({
+      msg: "mock_whatsapp_message_sent",
+      payload,
+    });
+    return { status: "ok" };
   }
 }
 
@@ -1586,8 +2037,160 @@ export class MockWhatsAppProvider implements IWhatsAppProvider {
 ============================================================
 FILE: src/providers/whatsapp/IWhatsAppProvider.ts
 ============================================================
+export type OutboundMessage = 
+  | { type: "text"; to: string; text: string }
+  | { type: "audio"; to: string; url: string }
+  | { type: "media"; to: string; url: string; caption?: string }
+  | { type: "reply"; to: string; text: string; replyToMessageId: string };
+
 export interface IWhatsAppProvider {
-  sendMessage(phone: string, message: string): Promise<any>;
+  sendMessage(payload: OutboundMessage): Promise<any>;
+}
+
+
+
+============================================================
+FILE: src/domain/intent/IIntentHandler.ts
+============================================================
+export interface IIntentHandler {
+  handle(context: {
+    tenantId: string;
+    phone: string;
+    content: string;
+    intent: string;
+  }): Promise<string>;
+}
+
+
+
+============================================================
+FILE: src/domain/intent/IntentHandlerRegistry.ts
+============================================================
+import { IIntentHandler } from "./IIntentHandler";
+import { ScheduleIntentHandler } from "./handlers/ScheduleIntentHandler";
+import { DefaultIntentHandler } from "./handlers/DefaultIntentHandler";
+import { EmergencyIntentHandler } from "./handlers/EmergencyIntentHandler";
+
+export class IntentHandlerRegistry {
+  private handlers = new Map<string, IIntentHandler>();
+  private defaultHandler: IIntentHandler;
+
+  constructor() {
+    this.defaultHandler = new DefaultIntentHandler();
+    this.handlers.set("SCHEDULE", new ScheduleIntentHandler());
+    this.handlers.set("EMERGENCY", new EmergencyIntentHandler());
+  }
+
+  getHandler(intent: string): IIntentHandler {
+    return this.handlers.get(intent) || this.defaultHandler;
+  }
+}
+
+
+
+============================================================
+FILE: src/domain/intent/handlers/DefaultIntentHandler.ts
+============================================================
+import { IIntentHandler } from "../IIntentHandler";
+
+export class DefaultIntentHandler implements IIntentHandler {
+  async handle(context: { tenantId: string; phone: string; content: string; intent: string }): Promise<string> {
+    return "Olá! Sou o assistente virtual. Como posso ajudar?";
+  }
+}
+
+
+
+============================================================
+FILE: src/domain/intent/handlers/EmergencyIntentHandler.ts
+============================================================
+import { IIntentHandler } from "../IIntentHandler";
+
+export class EmergencyIntentHandler implements IIntentHandler {
+  async handle(context: { tenantId: string; phone: string; content: string; intent: string }): Promise<string> {
+    return "Por favor, dirija-se imediatamente ao pronto-socorro mais próximo ou ligue para o serviço de emergência.";
+  }
+}
+
+
+
+============================================================
+FILE: src/domain/intent/handlers/ScheduleIntentHandler.ts
+============================================================
+import { IIntentHandler } from "../IIntentHandler";
+
+export class ScheduleIntentHandler implements IIntentHandler {
+  async handle(context: { tenantId: string; phone: string; content: string; intent: string }): Promise<string> {
+    return "Para agendar, por favor informe a data e hora desejada.";
+  }
+}
+
+
+
+============================================================
+FILE: src/domain/conversation/ConversationStateService.ts
+============================================================
+import { IConversationRepository } from "../../application/interfaces/repositories";
+import { logger } from "../../lib/logger";
+
+export class ConversationStateService {
+  constructor(private conversationRepo: IConversationRepository) {}
+
+  async transitionToHuman(conversationId: string): Promise<void> {
+    logger.info({ event: "conversation.transition", status: "HUMAN", conversationId });
+    await this.conversationRepo.updateStatus(conversationId, "HUMAN");
+  }
+
+  async transitionToAuto(conversationId: string): Promise<void> {
+    logger.info({ event: "conversation.transition", status: "AUTO", conversationId });
+    await this.conversationRepo.updateStatus(conversationId, "AUTO");
+  }
+
+  async applyAction(conversationId: string, targetStatus: string): Promise<boolean> {
+    if (targetStatus === "HUMAN") {
+      await this.transitionToHuman(conversationId);
+      return true;
+    } else if (targetStatus === "AUTO") {
+      await this.transitionToAuto(conversationId);
+      return true;
+    }
+    return false;
+  }
+}
+
+
+
+============================================================
+FILE: src/interfaces/cron/scheduler.ts
+============================================================
+import cron from "node-cron";
+import { SchedulingService } from "../../modules/scheduling/service";
+import { PrismaLogRepository } from "../../infrastructure/persistence/PrismaRepositories";
+import { prisma } from "../../lib/prisma";
+import { logger } from "../../lib/logger";
+
+export function startCronJobs(
+  schedulingService: SchedulingService,
+  logRepo: PrismaLogRepository
+) {
+  // Todo dia 08:00
+  cron.schedule("0 8 * * *", async () => {
+    logger.info({ msg: "running_daily_reminders" });
+    await schedulingService.sendDailyReminders();
+  });
+
+  // Todo dia 03:00 (Log cleanup)
+  cron.schedule("0 3 * * *", async () => {
+    logger.info({ msg: "running_log_cleanup" });
+    try {
+      const threshold = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000); // 14 days
+      await logRepo.deleteOlderThan(threshold);
+    } catch (error) {
+      logger.error({ msg: "log_cleanup_failed", error });
+    }
+  });
+
+  logger.info({ msg: "cron_jobs_started" });
 }
 
 
@@ -1595,16 +2198,18 @@ export interface IWhatsAppProvider {
 ============================================================
 FILE: src/modules/ai/classifier.ts
 ============================================================
+import { MessageIntent, MessagePriority } from "../conversations/types";
+
 interface ClassificationResult {
-    intent: string;
-    risk_level: string;
+  intent: string;
+  risk_level: string;
 }
 
 export function classifyMessage(message: string): ClassificationResult {
-    return {
-        intent: "unknown",
-        risk_level: "low"
-    };
+  return {
+    intent: MessageIntent.UNKNOWN,
+    risk_level: MessagePriority.LOW,
+  };
 }
 
 
@@ -1637,152 +2242,46 @@ export class PromptService {
 ============================================================
 FILE: src/modules/whatsapp/service.ts
 ============================================================
-import { IWhatsAppProvider } from "../../providers/whatsapp/IWhatsAppProvider";
+import { IWhatsAppProvider, OutboundMessage } from "../../providers/whatsapp/IWhatsAppProvider";
 
 export class WhatsAppService {
   constructor(private provider: IWhatsAppProvider) {}
 
-  async sendMessage(phone: string, content: string) {
-    return this.provider.sendMessage(phone, content);
+  async sendMessage(payload: OutboundMessage) {
+    return this.provider.sendMessage(payload);
   }
 }
 
 
 
 ============================================================
-FILE: src/modules/webhook/handleStatus.ts
+FILE: src/modules/webhook/WebhookController.ts
 ============================================================
-import { logger } from "../../lib/logger";
-
-export async function handleStatus(status: any, requestId: string) {
-  if (status.status === "failed") {
-    logger.error({ 
-      msg: "whatsapp_failed", 
-      requestId,
-      status: status.status,
-      messageId: status.id,
-      recipient: status.recipient_id,
-      errors: status.errors ?? null
-    });
-  } else {
-    logger.info({ 
-      msg: "whatsapp_status", 
-      requestId,
-      status: status.status,
-      messageId: status.id,
-      recipient: status.recipient_id 
-    });
-  }
-}
-
-
-
-============================================================
-FILE: src/modules/webhook/webhookHandler.ts
-============================================================
-import { handleStatus } from "./handlers/handleStatus";
-import { handleIncomingMessage } from "./handlers/handleIncomingMessage";
+import { Request, Response } from "express";
 import { randomUUID } from "node:crypto";
+import { logger } from "../../lib/logger";
+import { incomingMessageQueue } from "../../application/queues/messageQueue";
 
-const handlers = [handleStatus, handleIncomingMessage];
+export class WebhookController {
+  constructor() {}
 
-export async function webhookHandler(value: any) {
-  if (!value) return;
+  async handle(req: Request, res: Response) {
+    const value = req.body?.entry?.[0]?.changes?.[0]?.value;
 
-  const requestId = randomUUID();
-  
-  const contextValue = {
-    ...value,
-    requestId
-  }
+    // 1. Respond immediately
+    res.sendStatus(200);
 
-  for (const handler of handlers) {
-    await handler(contextValue);
-  }
-}
+    // 2. Process async
+    if (value) {
+      const requestId = randomUUID();
+      const contextValue = { ...value, requestId };
 
-
-
-============================================================
-FILE: src/modules/webhook/handlers/handleIncomingMessage.ts
-============================================================
-import { logger } from "../../../lib/logger";
-import { conversationEngine } from "../../../container";
-import { asyncLocalStorage, RequestContext } from "../../../lib/requestContext";
-import { prisma } from "../../../lib/prisma";
-
-export async function handleIncomingMessage(value: any) {
-  if (!value?.messages || value.messages.length === 0) return;
-
-  const message = value.messages[0];
-  const requestId = value.requestId;
-
-  if (!message?.text?.body || !message?.from) {
-    logger.warn({
-      event: "message.invalid_payload",
-      requestId,
-      payload: {
-        hasText: !!message.text?.body,
-        from: message.from,
-      },
-    });
-    return;
-  }
-
-  const messageId: string = message.id;
-  const phone: string = message.from;
-  const text: string = message.text.body;
-  const phoneNumberId = value.metadata?.phone_number_id;
-
-  if (!phoneNumberId) {
-    logger.warn({ event: "missing_phone_number_id", value });
-    return;
-  }
-
-  const tenant = await prisma.tenant.findUnique({
-    where: { phoneNumberId }
-  });
-
-  if (!tenant) {
-    logger.warn({ event: "tenant_not_found", phoneNumberId });
-    return;
-  }
-
-  const tenantId = tenant.id;
-
-  const context: RequestContext = {
-    requestId,
-    messageId,
-    phone,
-    tenantId,
-  };
-
-  await asyncLocalStorage.run(context, async () => {
-    try {
-      logger.info({
-        event: "message.received",
-        content: text,
-      });
-
-      await conversationEngine.handleIncomingMessage(
-        tenantId,
-        phone,
-        text,
-        messageId,
-      );
-
-      logger.info({
-        event: "message.processed",
-        phone,
-        success: true,
-      });
-    } catch (error) {
-      logger.error({
-        event: "webhook.error",
-        error,
+      // Push directly to queue
+      incomingMessageQueue.add("process-webhook", contextValue).catch((err) => {
+        logger.error({ msg: "webhook_enqueue_error", error: err });
       });
     }
-  });
+  }
 }
 
 
@@ -1799,21 +2298,22 @@ export async function handleStatus(value: any) {
   const requestId = value.requestId; // Expected to be injected by webhookHandler
 
   if (status.status === "failed") {
-    logger.error({ 
-      event: "whatsapp.failed", 
+    logger.error({
+      event: "whatsapp.failed",
       requestId,
       status: status.status,
       messageId: status.id,
       recipient: status.recipient_id,
-      errors: status.errors ?? null
+      errors: status.errors ?? null,
     });
   } else {
-    logger.info({ 
-      event: "whatsapp.status", 
+    ("");
+    logger.info({
+      event: "whatsapp.status",
       requestId,
       status: status.status,
       messageId: status.id,
-      recipient: status.recipient_id 
+      recipient: status.recipient_id,
     });
   }
 }
@@ -1821,170 +2321,181 @@ export async function handleStatus(value: any) {
 
 
 ============================================================
-FILE: src/modules/conversations/engine.ts
+FILE: src/modules/conversations/ConversationService.ts
 ============================================================
-import crypto from "crypto";
-import { Prisma } from "@prisma/client";
-import { prisma } from "../../lib/prisma";
-import { logger } from "../../lib/logger";
-import { WhatsAppService } from "../whatsapp/service";
-import { PromptService } from "../ai/promptService";
+import { IConversationRepository } from "../../application/interfaces/repositories";
+import { ConversationStatus } from "./types";
 
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+export class ConversationService {
+  constructor(private conversationRepo: IConversationRepository) {}
 
-function checkRateLimit(phone: string): boolean {
-  const now = Date.now();
-  const limitWindowMs = 10000;
-  const maxMessages = 15;
+  async getOrCreate(tenantId: string, phone: string) {
+    let conversation = await this.conversationRepo.findByPhone(tenantId, phone);
 
-  let record = rateLimitMap.get(phone);
-  if (!record || now > record.resetAt) {
-    record = { count: 0, resetAt: now + limitWindowMs };
-    rateLimitMap.set(phone, record);
+    if (!conversation) {
+      conversation = await this.conversationRepo.create({
+        tenantId,
+        phone,
+        status: ConversationStatus.AUTO
+      });
+    }
+
+    return conversation;
   }
-
-  record.count++;
-  return record.count <= maxMessages;
 }
 
-export class ConversationEngine {
-  constructor(
-    private whatsappService: WhatsAppService,
-    private promptService: PromptService,
-  ) {}
 
-  async handleIncomingMessage(
-    tenantId: string,
-    phone: string,
-    content: string,
-    messageId: string,
-  ) {
-    const start = Date.now();
 
+============================================================
+FILE: src/modules/conversations/aiRouter.ts
+============================================================
+import { IntentLoader } from "./intent/intent.loader";
+import { IntentResolver } from "./intent/intent.resolver";
+import { AIClassification } from "./types";
+
+export class AIRouter {
+  private readonly resolver: IntentResolver;
+
+  constructor() {
+    const loader = new IntentLoader();
+    this.resolver = new IntentResolver(loader);
+  }
+
+  classify(
+    message: string,
+    debug = false,
+    tenantId?: string,
+  ): AIClassification {
+    return this.resolver.resolve(message);
+  }
+}
+
+
+
+============================================================
+FILE: src/modules/conversations/IntentService.ts
+============================================================
+import { AIRouter } from "./aiRouter";
+import { AIClassification } from "./types";
+
+export class IntentService {
+  private aiRouter: AIRouter;
+
+  constructor() {
+    this.aiRouter = new AIRouter();
+  }
+
+  classify(content: string, tenantId: string): AIClassification {
+    return this.aiRouter.classify(content, false, tenantId);
+  }
+}
+
+
+
+============================================================
+FILE: src/modules/conversations/ConversationFlowService.ts
+============================================================
+import { ConversationStateService } from "../../domain/conversation/ConversationStateService";
+import { AIClassification, ConversationStatus, MessagePriority } from "./types";
+
+export class ConversationFlowService {
+  constructor(private stateService: ConversationStateService) {}
+
+  async decide(conversation: any, classification: AIClassification) {
+    const currentStatus = conversation.status as ConversationStatus;
+
+    if (currentStatus === ConversationStatus.HUMAN) {
+      return { action: ConversationStatus.HUMAN };
+    }
+
+    if (classification.priority === MessagePriority.HIGH) {
+      await this.stateService.applyAction(conversation.id, ConversationStatus.HUMAN);
+      return { action: ConversationStatus.HUMAN };
+    }
+
+    const nextAction = classification.action || ConversationStatus.AUTO;
+
+    if (nextAction !== currentStatus) {
+      await this.stateService.applyAction(conversation.id, nextAction);
+    }
+
+    return { ...classification, action: nextAction };
+  }
+}
+
+
+
+============================================================
+FILE: src/modules/conversations/ResponseService.ts
+============================================================
+import { IntentHandlerRegistry } from "../../domain/intent/IntentHandlerRegistry";
+import { MessageIntent } from "./types";
+
+export class ResponseService {
+  private intentRegistry: IntentHandlerRegistry;
+
+  constructor() {
+    this.intentRegistry = new IntentHandlerRegistry();
+  }
+
+  async generate(intent: MessageIntent, tenantId: string, phone: string, content: string): Promise<string> {
+    const handler = this.intentRegistry.getHandler(intent);
+    
+    return await handler.handle({
+      tenantId,
+      phone,
+      content,
+      intent
+    });
+  }
+}
+
+
+
+============================================================
+FILE: src/modules/conversations/MessageService.ts
+============================================================
+import { IMessageRepository } from "../../application/interfaces/repositories";
+import { MessageDirection } from "./types";
+import { outboundMessageQueue } from "../../application/queues/messageQueue";
+
+export class MessageService {
+  constructor(private messageRepo: IMessageRepository) {}
+
+  async saveInbound(conversationId: string, content: string, externalId: string): Promise<boolean> {
     try {
-      if (!phone || !content) return;
-      if (!checkRateLimit(phone)) return;
-
-      // 1. Message received
-      logger.info({
-        event: "message.received",
+      await this.messageRepo.create({
+        conversationId,
+        direction: MessageDirection.INBOUND,
         content,
+        externalId: externalId || null,
       });
-
-      let conversation = await prisma.conversation.findFirst({
-        where: { tenantId, phone },
-      });
-
-      if (!conversation) {
-        conversation = await prisma.conversation.create({
-          data: { tenantId, phone, status: "AUTO" },
-        });
+      return true;
+    } catch (error: any) {
+      if (error.code === "P2002") {
+        return false; // Duplicate
       }
+      throw error;
+    }
+  }
 
-      try {
-        await prisma.message.create({
-          data: {
-            conversationId: conversation.id,
-            direction: "INBOUND",
-            content,
-            externalId: messageId || null,
-          },
-        });
-      } catch (error) {
-        if (
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === "P2002"
-        ) {
-          return;
-        }
-        throw error;
-      }
+  async saveOutbound(conversationId: string, content: string, outboundId: string, phone: string): Promise<void> {
+    const exists = await this.messageRepo.findByOutboundId(outboundId);
 
-      // 2. Message persisted
-      logger.info({
-        event: "message.persisted",
-        conversationId: conversation.id,
+    if (!exists) {
+      const msg = await this.messageRepo.create({
+        conversationId,
+        direction: MessageDirection.OUTBOUND,
+        content,
+        outboundId,
+        status: "PENDING"
       });
 
-      const action = conversation.status as "AUTO" | "SUGGESTION" | "HUMAN";
-
-      // 3. Decision
-      logger.info({
-        event: "message.action",
-        action,
-      });
-
-      if (action === "HUMAN") {
-        return { action };
-      }
-
-      // Classify intent
-      const normalizedContent = content.toLowerCase();
-      const intent = normalizedContent.includes("agendar")
-        ? "schedule"
-        : "unknown";
-      const priority = "normal";
-
-      // 4. Classification
-      logger.info({
-        event: "message.classified",
-        intent,
-        priority,
-      });
-
-      let responseText = "";
-      if (intent === "schedule") {
-        responseText =
-          "Para agendar, por favor informe a data e hora desejada.";
-      } else {
-        responseText = "Olá! Sou o assistente virtual. Como posso ajudar?";
-      }
-
-      // 5. Response
-      logger.info({
-        event: "message.response",
-        response: responseText,
-      });
-
-      const windowMinutes = Math.floor(Date.now() / 60000);
-      const hashString = `${phone}-${responseText}-${windowMinutes}`;
-      const outboundId = crypto
-        .createHash("sha256")
-        .update(hashString)
-        .digest("hex");
-
-      const exists = await prisma.message.findUnique({
-        where: { outboundId },
-      });
-
-      if (!exists) {
-        await this.whatsappService.sendMessage(phone, responseText);
-        await prisma.message.create({
-          data: {
-            conversationId: conversation.id,
-            direction: "OUTBOUND",
-            content: responseText,
-            outboundId,
-          },
-        });
-      }
-
-      return {
-        response: responseText,
-        action,
-        intent,
-      };
-    } catch (error) {
-      logger.error({
-        event: "message.error",
-        error,
-      });
-    } finally {
-      const durationMs = Date.now() - start;
-      // 6. Done
-      logger.info({
-        event: "message.done",
-        durationMs,
+      // Point 10: Enqueue after saving
+      await outboundMessageQueue.add("send-message", {
+        messageId: msg.id,
+        phone,
+        content
       });
     }
   }
@@ -1993,41 +2504,468 @@ export class ConversationEngine {
 
 
 ============================================================
+FILE: src/modules/conversations/types.ts
+============================================================
+export enum ConversationStatus {
+  AUTO = "AUTO",
+  SUGGESTION = "SUGGESTION",
+  HUMAN = "HUMAN",
+}
+
+export enum MessageIntent {
+  SCHEDULE = "SCHEDULE",
+  UNKNOWN = "UNKNOWN",
+}
+
+export enum MessagePriority {
+  NORMAL = "NORMAL",
+  HIGH = "HIGH",
+  LOW = "LOW",
+}
+
+export enum MessageDirection {
+  INBOUND = "INBOUND",
+  OUTBOUND = "OUTBOUND",
+}
+
+export interface EvaluatedRule {
+  intent: MessageIntent;
+  matches: number;
+  score: number;
+  matchedPatterns: string[];
+}
+
+export interface AIClassification {
+  intent: MessageIntent;
+  priority: MessagePriority;
+  action: ConversationStatus;
+  score?: number;
+  matchedPatterns?: string[];
+  skippedRulesCount?: number;
+  evaluatedRules?: EvaluatedRule[];
+}
+
+
+
+
+
+============================================================
+FILE: src/modules/conversations/intent/intent.resolver.ts
+============================================================
+import { IntentLoader, CompiledIntentRule } from "./intent.loader";
+import {
+  AIClassification,
+  MessageIntent,
+  MessagePriority,
+  ConversationStatus,
+  EvaluatedRule,
+} from "../types";
+import { normalizeText, tokenizeNormalized } from "../utils/normalize";
+
+export class IntentResolver {
+  private cache = new Map<string, AIClassification>();
+  private readonly MAX_CACHE_SIZE = 500;
+
+  constructor(private readonly loader: IntentLoader) {}
+
+  resolve(message: string, debug = false, tenantId?: string): AIClassification {
+    const text = normalizeText(message);
+    if (!text) {
+      return this.fallback();
+    }
+
+    const key = tenantId ? `${text}-${tenantId}` : text;
+
+    if (!debug && this.cache.has(key)) {
+      const cachedResult = this.cache.get(key)!;
+      // LRU refresh
+      this.cache.delete(key);
+      this.cache.set(text, cachedResult);
+      return cachedResult;
+    }
+
+    const messageTokens = tokenizeNormalized(text);
+
+    let skippedRulesCount = 0;
+    const evaluatedRules: EvaluatedRule[] = [];
+
+    // --- PHASE 1: HIGH PRIORITY DETECTION ---
+    const highPriorityRules = this.loader.getHighPriorityRules();
+    for (const rule of highPriorityRules) {
+      if (!this.hasIntersection(messageTokens, rule.keywords)) {
+        skippedRulesCount++;
+        continue;
+      }
+
+      let matches = 0;
+      const matchedPatterns: string[] = [];
+
+      for (let i = 0; i < rule.regexes.length; i++) {
+        if (rule.regexes[i].test(text)) {
+          matches++;
+          matchedPatterns.push(rule.patterns[i]);
+        }
+      }
+
+      const score = rule.weight; // Constant score for High Priority
+
+      if (debug) {
+        evaluatedRules.push({
+          intent: rule.intent,
+          matches,
+          score,
+          matchedPatterns,
+        });
+      }
+
+      if (matches > 0) {
+        return this.returnResult(
+          text,
+          {
+            intent: rule.intent,
+            priority: rule.priority,
+            action: rule.action,
+            score,
+            matchedPatterns,
+            skippedRulesCount,
+            ...(debug && { evaluatedRules }),
+          },
+          debug,
+        );
+      }
+    }
+
+    // --- PHASE 2: SCORING (Non-HIGH priority) ---
+    const normalRules = this.loader.getNormalRules();
+    let bestRule: CompiledIntentRule | null = null;
+    let bestScore = -1;
+    let bestMatchedPatterns: string[] = [];
+
+    for (const rule of normalRules) {
+      if (!this.hasIntersection(messageTokens, rule.keywords)) {
+        skippedRulesCount++;
+        continue;
+      }
+
+      let matches = 0;
+      const matchedPatterns: string[] = [];
+
+      for (let i = 0; i < rule.regexes.length; i++) {
+        if (rule.regexes[i].test(text)) {
+          matches++;
+          matchedPatterns.push(rule.patterns[i]);
+        }
+      }
+
+      if (debug) {
+        evaluatedRules.push({
+          intent: rule.intent,
+          matches,
+          score: rule.weight + matches / rule.patternCount,
+          matchedPatterns,
+        });
+      }
+
+      if (matches > 0) {
+        const score = rule.weight + matches / rule.patternCount;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestRule = rule;
+          bestMatchedPatterns = matchedPatterns;
+        }
+      }
+    }
+
+    if (bestRule) {
+      return this.returnResult(
+        text,
+        {
+          intent: bestRule.intent,
+          priority: bestRule.priority,
+          action: bestRule.action,
+          score: bestScore,
+          matchedPatterns: bestMatchedPatterns,
+          skippedRulesCount,
+          ...(debug && { evaluatedRules }),
+        },
+        debug,
+      );
+    }
+
+    return this.returnResult(
+      text,
+      this.fallback(skippedRulesCount, debug ? evaluatedRules : undefined),
+      debug,
+    );
+  }
+
+  private hasIntersection(tokens: Set<string>, keywords: Set<string>): boolean {
+    if (keywords.size === 0) return false; // Rule matches nothing if empty
+    for (const token of tokens) {
+      if (keywords.has(token)) return true;
+    }
+    return false;
+  }
+
+  private fallback(
+    skippedRulesCount = 0,
+    evaluatedRules?: EvaluatedRule[],
+  ): AIClassification {
+    return {
+      intent: MessageIntent.UNKNOWN,
+      priority: MessagePriority.LOW,
+      action: ConversationStatus.AUTO,
+      score: 0,
+      matchedPatterns: [],
+      skippedRulesCount,
+      ...(evaluatedRules && { evaluatedRules }),
+    };
+  }
+
+  private returnResult(
+    key: string,
+    result: AIClassification,
+    debug: boolean,
+  ): AIClassification {
+    if (!debug) {
+      if (this.cache.size >= this.MAX_CACHE_SIZE) {
+        const firstKey = this.cache.keys().next().value;
+        if (firstKey !== undefined) this.cache.delete(firstKey);
+      }
+      this.cache.set(key, result);
+    }
+    return result;
+  }
+}
+
+
+
+============================================================
+FILE: src/modules/conversations/intent/intent.config.ts
+============================================================
+import { MessageIntent, MessagePriority, ConversationStatus } from "../types";
+
+export interface IntentRule {
+  intent: MessageIntent;
+  priority: MessagePriority;
+  action: ConversationStatus;
+  weight: number;
+  patterns: string[];
+}
+
+// This file is the source of truth for intent classification.
+// No logic should be placed outside this file.
+
+export const INTENT_RULES: IntentRule[] = [
+  {
+    intent: MessageIntent.SCHEDULE,
+    priority: MessagePriority.NORMAL,
+    action: ConversationStatus.AUTO,
+    weight: 10,
+    patterns: [
+      "agendar",
+      "consulta",
+      "marcar",
+      "horario",
+      "disponivel",
+      "vago",
+      "vagas",
+      "agenda",
+      "abrir vaga",
+    ],
+  },
+  {
+    intent: MessageIntent.UNKNOWN,
+    priority: MessagePriority.HIGH,
+    action: ConversationStatus.HUMAN,
+    weight: 100,
+    patterns: [
+      "dor no peito",
+      "urgente",
+      "emergencia",
+      "socorro",
+      "ajuda",
+      "ajuda medica",
+    ],
+  },
+];
+
+
+
+
+
+============================================================
+FILE: src/modules/conversations/intent/intent.loader.ts
+============================================================
+import { INTENT_RULES, IntentRule } from "./intent.config";
+import { normalizeText, tokenizeNormalized } from "../utils/normalize";
+import { MessagePriority } from "../types";
+
+export interface CompiledIntentRule extends IntentRule {
+  regexes: RegExp[];
+  patternCount: number;
+  keywords: Set<string>;
+}
+
+export class IntentLoader {
+  private highPriorityRules: CompiledIntentRule[] = [];
+  private normalRules: CompiledIntentRule[] = [];
+
+  constructor() {
+    const compiled = this.normalize(INTENT_RULES);
+    this.validate(compiled);
+
+    for (const rule of compiled) {
+      if (rule.priority === MessagePriority.HIGH) {
+        this.highPriorityRules.push(rule);
+      } else {
+        this.normalRules.push(rule);
+      }
+    }
+  }
+
+  getHighPriorityRules(): CompiledIntentRule[] {
+    return this.highPriorityRules;
+  }
+
+  getNormalRules(): CompiledIntentRule[] {
+    return this.normalRules;
+  }
+
+  private normalize(rules: IntentRule[]): CompiledIntentRule[] {
+    return rules.map((rule) => {
+      const keywords = new Set<string>();
+      rule.patterns.forEach((p) => {
+        const normalized = normalizeText(p);
+        tokenizeNormalized(normalized).forEach((token: string) =>
+          keywords.add(token),
+        );
+      });
+
+      return {
+        ...rule,
+        regexes: rule.patterns.map((p) => this.toRegex(p)),
+        patternCount: Math.max(1, rule.patterns.length), // avoid division by zero
+        keywords,
+      };
+    });
+  }
+
+  private toRegex(pattern: string): RegExp {
+    const normalizedPattern = normalizeText(pattern);
+    const words = normalizedPattern.split(/\s+/);
+
+    // Create strategy: \bword\w*\b for each word
+    const regexParts = words.map((word) => `\\b${word}\\w*\\b`);
+    const regexStr = regexParts.join("\\s+");
+
+    return new RegExp(regexStr, "i"); // "i" is safe
+  }
+
+  private validate(rules: IntentRule[]) {
+    for (const rule of rules) {
+      if (!rule.patterns || rule.patterns.length === 0) {
+        throw new Error(`Intent ${rule.intent} must have at least one pattern`);
+      }
+    }
+  }
+}
+
+
+
+============================================================
+FILE: src/modules/conversations/context/contextBuilder.ts
+============================================================
+import { MessageDirection } from "../types";
+
+export interface ContextMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ConversationContext {
+  messages: ContextMessage[];
+  lastUserMessage?: string;
+  lastAssistantMessage?: string;
+}
+
+export class ContextBuilder {
+  private readonly MAX_MESSAGES = 12;
+
+  build(
+    messages: {
+      content: string;
+      direction: MessageDirection;
+    }[],
+  ): ConversationContext {
+    if (!messages || messages.length === 0) {
+      return { messages: [] };
+    }
+
+    // garante ordem cronológica
+    const ordered = [...messages]
+      .sort((a, b) => (a as any).createdAt - (b as any).createdAt)
+      .slice(-this.MAX_MESSAGES);
+
+    const contextMessages: ContextMessage[] = ordered.map((msg) => ({
+      role: msg.direction === MessageDirection.INBOUND ? "user" : "assistant",
+      content: msg.content,
+    }));
+
+    const lastUser = [...contextMessages]
+      .reverse()
+      .find((m) => m.role === "user");
+
+    const lastAssistant = [...contextMessages]
+      .reverse()
+      .find((m) => m.role === "assistant");
+
+    return {
+      messages: contextMessages,
+      lastUserMessage: lastUser?.content,
+      lastAssistantMessage: lastAssistant?.content,
+    };
+  }
+}
+
+
+
+============================================================
+FILE: src/modules/conversations/utils/normalize.ts
+============================================================
+export function normalizeText(input: string): string {
+  if (!input) return "";
+  return input
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove accents
+    .toLowerCase()
+    .replace(/[^\w\s]/gi, "") // remove punctuation safely
+    .replace(/\s+/g, " ") // collapse multiple spaces
+    .trim();
+}
+
+export function tokenizeNormalized(normalizedText: string): Set<string> {
+  return new Set(normalizedText.split(" ").filter((w) => w.length >= 2));
+}
+
+
+
+============================================================
 FILE: src/modules/scheduling/service.ts
 ============================================================
-import cron from "node-cron";
-import { prisma } from "../../lib/prisma";
 import { logger } from "../../lib/logger";
 import { WhatsAppService } from "../whatsapp/service";
+import { IAppointmentRepository, ILogRepository } from "../../application/interfaces/repositories";
 
 export class SchedulingService {
-  constructor(private whatsappService: WhatsAppService) {
-    this.scheduleDailyReminders();
-  }
+  constructor(
+    private whatsappService: WhatsAppService,
+    private appointmentRepo: IAppointmentRepository,
+    private logRepo: ILogRepository
+  ) {}
 
-  // Jobs
-  private scheduleDailyReminders() {
-    // Todo dia 08:00
-    cron.schedule("0 8 * * *", async () => {
-      logger.info({ msg: "running_daily_reminders" });
-      await this.sendDailyReminders();
-    });
-
-    // Todo dia 03:00 (Log cleanup)
-    cron.schedule("0 3 * * *", async () => {
-      logger.info({ msg: "running_log_cleanup" });
-      try {
-        const threshold = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000); // 14 days
-        await prisma.log.deleteMany({
-          where: { createdAt: { lt: threshold } },
-        });
-      } catch (error) {
-        logger.error({ msg: "log_cleanup_failed", error });
-      }
-    });
-  }
-
-  private async sendDailyReminders() {
+  async sendDailyReminders() {
     try {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
@@ -2036,25 +2974,13 @@ export class SchedulingService {
       const afterTomorrow = new Date(tomorrow);
       afterTomorrow.setDate(tomorrow.getDate() + 1);
 
-      const appointments = await prisma.appointment.findMany({
-        where: {
-          date: {
-            gte: tomorrow,
-            lt: afterTomorrow,
-          },
-          status: "SCHEDULED",
-        },
-        take: 500, // Pagination safety limit
-        include: {
-          tenant: true,
-        },
-      });
+      const appointments = await this.appointmentRepo.findForTomorrow();
 
       for (const appt of appointments) {
         const message = `Olá ${appt.patientName}, lembrete de sua consulta amanhã às ${appt.date.getHours()}:${appt.date.getMinutes().toString().padStart(2, "0")}.`;
         try {
           const phone = appt.phone;
-          await this.whatsappService.sendMessage(phone, message);
+          await this.whatsappService.sendMessage({ type: "text", to: phone, text: message });
         } catch (error) {
           logger.error({
             msg: "reminder_send_failed",
@@ -2080,13 +3006,11 @@ export class SchedulingService {
       throw new Error("Horário indisponível");
     }
 
-    return prisma.appointment.create({
-      data: {
-        tenantId,
-        patientName,
-        phone,
-        date,
-      },
+    return this.appointmentRepo.create({
+      tenantId,
+      patientName,
+      phone,
+      date,
     });
   }
 
@@ -2095,15 +3019,7 @@ export class SchedulingService {
     const start = new Date(date);
     const end = new Date(date.getTime() + 30 * 60000);
 
-    const count = await prisma.appointment.count({
-      where: {
-        tenantId,
-        date: {
-          gte: start,
-          lt: end,
-        },
-      },
-    });
+    const count = await this.appointmentRepo.countConflicts(tenantId, start, end);
 
     return count > 0;
   }
@@ -2116,16 +3032,7 @@ export class SchedulingService {
     const afterTomorrow = new Date(tomorrow);
     afterTomorrow.setDate(tomorrow.getDate() + 1);
 
-    return prisma.appointment.findMany({
-      where: {
-        tenantId,
-        date: {
-          gte: tomorrow,
-          lt: afterTomorrow,
-        },
-      },
-      take: 100, // Pagination safety limit
-    });
+    return this.appointmentRepo.findForTomorrow(tenantId);
   }
 }
 
