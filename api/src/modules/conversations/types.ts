@@ -20,6 +20,14 @@ export enum MessageDirection {
   OUTBOUND = "OUTBOUND",
 }
 
+export enum MessageStatus {
+  PENDING = "PENDING",
+  SENT = "SENT",
+  FAILED = "FAILED",
+  DELIVERED = "DELIVERED",
+  READ = "READ",
+}
+
 export interface EvaluatedRule {
   intent: MessageIntent;
   matches: number;

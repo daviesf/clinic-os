@@ -1,8 +1,11 @@
-import { Router } from "express";
+import { Router, RequestHandler } from "express";
 import { WebhookController } from "../modules/webhook/WebhookController";
 import { env } from "../config/env";
 
-export function buildWebhookRoutes(controller: WebhookController): Router {
+export function buildWebhookRoutes(
+  controller: WebhookController,
+  signatureValidator?: RequestHandler
+): Router {
   const router = Router();
 
   router.get("/webhook", (req, res) => {
@@ -17,7 +20,8 @@ export function buildWebhookRoutes(controller: WebhookController): Router {
   return res.sendStatus(403);
 });
 
-  router.post("/webhook", (req, res) => controller.handle(req, res));
+  const postMiddleware: RequestHandler[] = signatureValidator ? [signatureValidator] : [];
+  router.post("/webhook", ...postMiddleware, (req, res) => controller.handle(req, res));
 
   return router;
 }

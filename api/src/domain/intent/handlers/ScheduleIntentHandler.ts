@@ -1,7 +1,13 @@
-import { IIntentHandler } from "../IIntentHandler";
+import { IIntentHandler, IntentHandlerContext } from "../IIntentHandler";
+import { MessageIntent } from "../../../modules/conversations/types";
 
 export class ScheduleIntentHandler implements IIntentHandler {
-  async handle(context: { tenantId: string; phone: string; content: string; intent: string }): Promise<string> {
-    return "Para agendar, por favor informe a data e hora desejada.";
+  async handle(context: IntentHandlerContext): Promise<string> {
+    return context.templateService.getTemplate(MessageIntent.SCHEDULE, {
+      tenantId: context.tenantId,
+      phone: context.phone,
+      content: context.content,
+      intent: context.intent,
+    });
   }
 }

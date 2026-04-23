@@ -16,7 +16,6 @@ export async function handleStatus(value: any) {
       errors: status.errors ?? null,
     });
   } else {
-    ("");
     logger.info({
       event: "whatsapp.status",
       requestId,

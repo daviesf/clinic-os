@@ -1,9 +1,10 @@
 
 import os
 import sys
+from datetime import datetime
 
 # Configurações
-output_filename = 'project_dump.txt'
+output_filename = 'project_dump_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '.txt'
 root_path = os.getcwd() # Ou defina um caminho específico se necessário
 output_filepath = os.path.join(root_path, output_filename)
 

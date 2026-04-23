@@ -1,7 +1,13 @@
 import { Conversation, Message, Tenant, Appointment, Log, Prisma } from "@prisma/client";
 
+export interface ConversationWithLastMessage extends Conversation {
+  lastMessage: string | null;
+}
+
 export interface IConversationRepository {
   findByPhone(tenantId: string, phone: string): Promise<Conversation | null>;
+  findById(id: string): Promise<Conversation | null>;
+  findAllByTenant(tenantId: string): Promise<ConversationWithLastMessage[]>;
   create(data: { tenantId: string; phone: string; status: any }): Promise<Conversation>;
   updateStatus(id: string, status: any): Promise<Conversation>;
 }
@@ -16,6 +22,7 @@ export interface IMessageRepository {
     status?: string;
   }): Promise<Message>;
   findByOutboundId(outboundId: string): Promise<Message | null>;
+  findByConversation(conversationId: string): Promise<Message[]>;
   updateStatus(id: string, status: string): Promise<Message>;
 }
 
@@ -32,4 +39,3 @@ export interface IAppointmentRepository {
 export interface ILogRepository {
   deleteOlderThan(date: Date): Promise<void>;
 }
-

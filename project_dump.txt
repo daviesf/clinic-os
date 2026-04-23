@@ -1,0 +1,3979 @@
+
+============================================================
+FILE: api/docker-compose.yml
+============================================================
+services:
+  db:
+    image: postgres:16
+    container_name: clinic_db
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - clinic_net
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:alpine
+    container_name: clinic_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - clinic_net
+
+  backend:
+    build: .
+    container_name: clinic_backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+      - .env.docker
+    networks:
+      - clinic_net
+
+volumes:
+  db_data:
+  redis_data:
+
+networks:
+  clinic_net:
+    driver: bridge
+
+
+
+============================================================
+FILE: api/debug_env.js
+============================================================
+require('dotenv').config();
+console.log('DATABASE_URL:', process.env.DATABASE_URL);
+
+
+
+============================================================
+FILE: api/audit_report_refactor.md
+============================================================
+# Relatório de Auditoria Técnica - Pós-Refatoração
+
+**Data:** 10/02/2026
+**Arquitetura:** Provider Pattern (Evolution API)
+**Maturidade Arquitetural:** 9/10
+**Prontidão para Produção:** 6/10
+
+## 1. Desacoplamento Arquitetural
+**Status:** ✅ Excelente
+
+- **Injeção de Dependência:** Implementada corretamente em `server.ts`. Nenhum módulo consumidor conhece `EvolutionProvider`.
+- **Interfaces:** `IWhatsAppProvider` define um contrato limpo.
+- **Ciclos:** Não há dependências circulares.
+- **Diagrama de Dependências:**
+    ```mermaid
+    graph TD
+        Server[server.ts] --> EvolutionProvider
+        Server --> WhatsAppService
+        Server --> ConversationEngine
+        Server --> SchedulingService
+        
+        WhatsAppService --> IWhatsAppProvider[Interface]
+        EvolutionProvider ..|> IWhatsAppProvider
+        
+        ConversationEngine --> WhatsAppService
+        SchedulingService --> WhatsAppService
+    ```
+
+## 2. Provider HTTP (EvolutionProvider)
+**Status:** ⚠️ Funcional, mas requer ajustes para Produção
+
+- **Robustez (Nota 7/10):**
+    -   ✅ Usa `axios` corretamente com BaseURL e Headers.
+    -   ✅ Trata erros com `try/catch`.
+    -   ⚠️ **Risco:** `axios` criado sem `timeout`. Se a Evolution API travar (hang), o backend do ClinicOS pode ficar preso aguardando resposta indefinidamente, esgotando conexões.
+    -   ⚠️ **Env Vars:** Usa valores default perigosos (`localhost`, `supersecretkey`). Em produção, deve falhar se as variáveis não existirem.
+
+## 3. Multi-Tenancy
+**Status:** ✅ Seguro
+
+- O `tenantId` é obrigatório em todas as chamadas do Provider.
+- A URL da Evolution é construída dinamicamente com o `tenantId` (`/message/sendText/${tenantId}`), garantindo isolamento de roteamento.
+
+## 4. Engine Conversacional
+**Status:** ⚠️ Falha Lógica Potencial
+
+- **Ordem de Execução:** O código tenta enviar a resposta (`await sendMessage`) **antes** de persistir a mensagem de entrada do usuário (`prisma.message.create`).
+    -   *Cenário de Erro:* Se a Evolution API estiver fora do ar, o `sendMessage` lança exceção. O `catch` captura, mas a mensagem original do usuário **nunca é salva no banco**. O histórico ficará incompleto.
+    -   *Correção:* Persistir a mensagem de entrada *antes* de processar a lógica de resposta.
+
+## 5. Server Initialization
+**Status:** ✅ Correto
+
+- Instanciação única do Provider e dos Serviços.
+- Log de inicialização claro.
+
+## 6. Riscos e Recomendações (Pré-Docker)
+
+### Críticos (Bloqueiam Produção)
+1.  **Logging de Mensagens:** Inverter ordem no `engine.ts` para salvar mensagem recebida antes de processar resposta.
+2.  **Timeout HTTP:** Configurar `timeout: 5000` (5s) no `axios` do Provider.
+3.  **Validação de Env:** Remover valores default de `EVOLUTION_BASE_URL` ou lançar erro se não definidos.
+
+### Melhorias Recomendadas
+1.  **Health Check:** Criar endpoint `/health` em `app.ts` para o Docker verificar se o container está vivo.
+2.  **Shutdown:** Implementar `process.on('SIGTERM')` para fechar conexão do Prisma e servidor Express graciosamente.
+
+## 7. Conclusão
+
+A refatoração foi um sucesso arquitetural. O código agora é modular, testável e desacoplado do Puppeteer. Os riscos restantes são puramente operacionais/lógicos e fáceis de corrigir.
+
+**Nota Final:** 8.5/10
+
+
+
+============================================================
+FILE: api/Dockerfile
+============================================================
+# ---------- BUILD STAGE ----------
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+# Gera Prisma Client
+RUN npx prisma generate
+
+# Build TypeScript
+RUN npm run build
+
+
+# ---------- PRODUCTION STAGE ----------
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copia tudo já pronto do builder
+COPY --from=builder /app ./
+
+EXPOSE 3000
+
+CMD ["node", "dist/server.js"]
+
+
+============================================================
+FILE: api/audit_report.md
+============================================================
+# Relatório de Auditoria Técnica - ClinicOS
+
+**Data:** 10/02/2026
+**Versão Auditada:** 1.0.0 (Initial Setup)
+**Maturidade Geral:** 2/10 (Protótipo Inicial)
+
+## 1. Arquitetura Geral
+**Status:** ⚠️ Incompleta
+
+- **Isolamento:** Os módulos (`whatsapp`, `conversations`, `scheduling`) estão em pastas separadas, o que é bom.
+- **Integração:** **Crítico.** Os módulos existem mas **não estão conectados**. O arquivo `server.ts` apenas inicia o Express, mas não instancia o `WhatsAppManager` nem o `SchedulingService`. O sistema, como está, não faz nada ao iniciar.
+- **Rotas:** Nenhuma rota API foi definida. Não há como criar tenants, consultar agendamentos ou iniciar sessões externamente.
+
+## 2. Multi-Tenancy
+**Status:** ⚠️ Funcional (Lógica) / 🔴 Risco (Arquitetura)
+
+- **Dados:** O Schema do Prisma utiliza corretamente `tenantId` em todas as tabelas relevantes (`User`, `Tenant`, `Appointment`, `Conversation`).
+- **Isolamento de Sessão:** O `WhatsAppManager` usa `clientId` para separar sessões do navegador. Isso funciona para isolamento de dados.
+- **Escalabilidade (Grave):** O uso de `whatsapp-web.js` (baseado em Puppeteer/Chromium) é **inviável** para um sistema multi-tenant na mesma máquina.
+    - *Estimativa:* Cada tenant consome ~300MB-500MB de RAM.
+    - *Limite:* Um servidor com 8GB de RAM suportaria no máximo ~15 clínicas simultâneas antes de travar.
+
+## 3. WhatsApp Manager
+**Status:** ⚠️ Básico
+
+- **Reconexão:** O código trata o evento `disconnected` apenas removendo o cliente do Map. Não há lógica de "auto-reconnect" robusta. Se o WhatsApp cair, a clínica fica offline até reinicialização manual.
+- **QR Code:** O código usa `qrcode-terminal`. Isso imprime o QR no console do servidor. Em produção, isso é inútil, pois o usuário final não tem acesso ao terminal do servidor. O QR code precisa ser exposto via API/WebSocket para o frontend.
+- **Start-up:** Não há rotina para restaurar sessões salvas na pasta `sessions/` ao reiniciar o servidor. O sistema começa "zerado" a cada deploy, exigindo re-scan ou lógica de restauração explícita (que falta no `createClient` ao iniciar).
+
+## 4. Engine Conversacional
+**Status:** ✅ Lógica Correta / ⚠️ Simplificado
+
+- **Regra AUTO/HUMAN:** Implementada corretamente. O bot verifica o status e executa `return` se for HUMAN.
+- **Friction Score:** Campo existe no banco, mas é **ignorado** pelo código. Não há lógica para incrementar esse score ou transbordar para humano automaticamente.
+- **Intent Mock:** A detecção de intenção é via `status === "schedule"`. Funcional para teste, mas frágil para produção.
+
+## 5. Scheduling
+**Status:** ⚠️ Risco Operacional
+
+- **Duplicação de Jobs:** O `node-cron` roda na instância da aplicação. Se você escalar o backend para 2 containers (para aguentar a carga do Puppeteer, por exemplo), o cron rodará em *ambos*, enviando mensagens duplicadas para os pacientes.
+- **Timezone:** O código usa `new Date()` (hora do sistema). Se o servidor estiver em UTC e a clínica no Brasil, os lembretes de "manhã às 08:00" serão enviados no horário errado (ex: 05:00 da manhã ou 11:00 da manhã).
+- **Conflito:** A verificação `count > 0` é funcional para MVP.
+
+## 6. Segurança
+**Status:** 🔴 Crítico
+
+- **Senhas:** O modelo `User` existe, mas não há código de cadastro (Sign Up) implementado, logo não há hashing de senha ativo.
+- **Logs:** `console.log` está imprimindo o objeto `qr` e mensagens.
+- **API:** Como não há rotas, não há autenticação (JWT) protegendo endpoints. Qualquer um com acesso à rede poderia (futuramente) controlar qualquer tenant se não for implementado corretamente.
+
+## 7. Recomendações Prioritárias (Roadmap para Produção)
+
+1.  **Arquitetura WhatsApp (Urgente):**
+    -   Substituir `whatsapp-web.js` por uma API externa (ex: Evolution API, Baileys em worker threads isolados) OU limitar drasticamente o número de tenants por servidor.
+    -   Expor QR Code via API (JSON/Base64) e não no terminal.
+
+2.  **Core do Server:**
+    -   Implementar `http/api/routes.ts`.
+    -   Instanciar `WhatsAppManager` no startup do `server.ts`.
+    -   Restaurar sessões existentes ao bootar.
+
+3.  **Segurança:**
+    -   Implementar Middleware de Auth (JWT).
+    -   Criar rotas de Login/Register com `bcrypt`.
+
+4.  **Resiliência:**
+    -   Mover o CRON para um serviço separado ou usar uma flag de "Leader Election" (ex: Redis lock) para evitar duplicação em cluster.
+    -   Configurar Timezone explicitamente (ex: `moment-timezone` ou configuração do env).
+
+## 8. Conclusão
+
+O projeto atual é um **esqueleto funcional** de lógica de negócios, mas **não é um sistema rodável**. Ele contém as peças (modelos, serviços), mas falta a "cola" (API, Inicialização) e a infraestrutura necessária para suportar múltiplos clientes WhatsApp sem colapso de memória.
+
+**Nota:** 2/10
+
+
+
+============================================================
+FILE: api/.gitignore
+============================================================
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Directory for instrumented libs generated by jscoverage/JSCover
+lib-cov
+
+# Coverage directory used by tools like istanbul
+coverage
+*.lcov
+
+# nyc test coverage
+.nyc_output
+
+# Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
+.grunt
+
+# Bower dependency directory (https://bower.io/)
+bower_components
+
+# node-waf configuration
+.lock-wscript
+
+# Compiled binary addons (https://nodejs.org/api/addons.html)
+build/Release
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Snowpack dependency directory (https://snowpack.dev/)
+web_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+.env.docker
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# Next.js build output
+.next
+out
+
+# Nuxt.js build / generate output
+.nuxt
+dist
+
+# Gatsby files
+.cache/
+# Comment in the public line in if your project uses Gatsby and not Next.js
+# https://nextjs.org/blog/next-9-1#public-directory-support
+# public
+
+# vuepress build output
+.vuepress/dist
+
+# vuepress v2.x temp and cache directory
+.temp
+.cache
+
+# vitepress build output
+**/.vitepress/dist
+
+# vitepress cache directory
+**/.vitepress/cache
+
+# Docusaurus cache and generated files
+.docusaurus
+
+# Serverless directories
+.serverless/
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# TernJS port file
+.tern-port
+
+# Stores VSCode versions used for testing VSCode extensions
+.vscode-test
+
+# yarn v2
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+
+
+============================================================
+FILE: api/debug_url.js
+============================================================
+try {
+    const url = "mysql://clinicos_user:afK10f[122G1gaoiI@152.67.40.125:5432/clinicosdb";
+    new URL(url);
+    console.log("URL is valid");
+} catch (e) {
+    console.error("URL is invalid:", e.message);
+}
+
+
+
+============================================================
+FILE: api/package.json
+============================================================
+{
+  "name": "clinic-os",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/server.js",
+  "scripts": {
+    "chat": "cross-env NODE_ENV=development tsx src/scripts/chat.ts",
+    "simulate": "cross-env NODE_ENV=development tsx src/scripts/simulateMessage.ts",
+    "dev": "cross-env NODE_ENV=development ts-node-dev --respawn --transpile-only src/server.ts",
+    "build": "tsc",
+    "start": "cross-env NODE_ENV=production node dist/server.js",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "db:up": "docker compose up -d db",
+    "db:down": "docker compose stop db",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio",
+    "prisma:push": "prisma db push"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.2.3",
+    "ts-node-dev": "^2.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.2",
+    "@types/pino-pretty": "^4.7.5",
+    "bcrypt": "^6.0.0",
+    "bullmq": "^5.74.1",
+    "cors": "^2.8.6",
+    "cross-env": "^10.1.0",
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
+    "ioredis": "^5.10.1",
+    "jsonwebtoken": "^9.0.3",
+    "node-cron": "^4.2.1",
+    "pg": "^8.18.0",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3",
+    "prisma": "^6.19.2"
+  }
+}
+
+
+
+============================================================
+FILE: api/tsconfig.json
+============================================================
+{
+    "compilerOptions": {
+        "target": "es2016",
+        "module": "commonjs",
+        "rootDir": "./src",
+        "outDir": "./dist",
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "strict": true,
+        "skipLibCheck": true
+    },
+    "exclude": [
+        "node_modules"
+    ]
+}
+
+
+============================================================
+FILE: api/README.md
+============================================================
+## Architecture Refactoring (Evolution API)
+
+The backend has been refactored to use the **Provider Pattern** for WhatsApp integration.
+
+- **Legacy Removed:** `whatsapp-web.js` and Puppeteer dependencies have been removed.
+- **New Provider:** `EvolutionProvider` connects to an external Evolution API instance via HTTP.
+- **Service Layer:** `WhatsAppService` wraps the provider, allowing for easy swapping of providers in the future.
+- **Dependency Injection:** `server.ts` handles the wiring of services.
+
+
+## Setup Instructions
+
+1.  **Install Dependencies**
+    ```bash
+    npm install
+    ```
+
+2.  **Environment Variables**
+    Update `.env` with:
+    ```
+    DATABASE_URL="postgresql://USER:PASSWORD@localhost:5432/clinic_os"
+    EVOLUTION_BASE_URL="http://your-evolution-api:8080"
+    EVOLUTION_API_KEY="your-api-key"
+    ```
+
+3.  **Start the Server**
+    ```bash
+    npm run dev
+    ```
+
+## Project Structure
+
+- `src/server.ts`: Entry point with dependency injection.
+- `src/providers/whatsapp`: implementations of `IWhatsAppProvider` (currently `EvolutionProvider`).
+- `src/modules/whatsapp`: Service layer.
+- `src/modules/conversations`: Logic for handling incoming messages.
+- `src/modules/scheduling`: Appointment management.
+
+
+
+
+============================================================
+FILE: api/send.js
+============================================================
+const TOKEN =
+  "EAAhnZAGJMmoQBRGpPbUPz4vr36tkt05oiQcKWfTQ6KuIZBF7DhF6W88EnYsOM25eJgCQz6jpHf4YOt3M1XMwhm3k3Uk0kUYIq7is0L4NaMa5IxWthnhtuE4ncWGjM5nnIVFBFfsbjzB0pYDgVeuh7ldOVKCn1llkWINZAsZA8AfwdGp3fSdqgO3Xbz5x9ASQt6gnZAM5lNX1MvQsjQ6K7C7PuSVthsIA2A1MvwJPdQHbrpyrnhsRXj3fl5SSyLA4HzVZALEAIfCuU8FqahKN8tZAXgX";
+const PHONE_NUMBER_ID = "1139336862576856";
+const TO = "5519982686748";
+
+async function sendMessage() {
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to: TO,
+          type: "text",
+          text: {
+            body: "oi",
+          },
+        }),
+      },
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.log("❌ ERRO:");
+      console.log(data);
+      return;
+    }
+
+    console.log("✅ SUCESSO:");
+    console.log(data);
+  } catch (error) {
+    console.log("❌ ERRO GERAL:");
+    console.log(error.message);
+  }
+}
+
+sendMessage();
+
+
+
+============================================================
+FILE: api/.gitattributes
+============================================================
+# Auto detect text files and perform LF normalization
+* text=auto
+
+
+
+============================================================
+FILE: api/tmp_prisma/schema.prisma
+============================================================
+datasource db {
+  provider = "sqlite"
+  url      = "file:./test.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Test {
+  id Int @id @default(autoincrement())
+}
+
+
+
+============================================================
+FILE: api/prisma/schema.prisma
+============================================================
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+
+enum ConversationStatus {
+  AUTO
+  SUGGESTION
+  HUMAN
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model Tenant {
+  id            String         @id @default(uuid())
+  phoneNumberId String?        @unique
+  name          String
+  users         User[]
+  conversations Conversation[]
+  appointments  Appointment[]
+  createdAt     DateTime       @default(now())
+}
+
+model Conversation {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  phone         String
+  status        ConversationStatus @default(AUTO)
+  frictionScore Int      @default(0)
+  messages      Message[]
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId, phone])
+}
+
+model Message {
+  id             String   @id @default(uuid())
+  externalId     String?  @unique
+  outboundId     String?  @unique
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  direction      MessageDirection
+  content        String
+  status         String   @default("SENT") // PENDING, SENT, FAILED
+  createdAt      DateTime @default(now())
+
+  @@index([conversationId])
+  @@index([externalId])
+  @@index([createdAt])
+}
+
+model Appointment {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  patientName String
+  phone     String
+  date      DateTime
+  status    String   @default("SCHEDULED")
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, date])
+}
+
+model Log {
+  id        String   @id @default(uuid())
+  level     String
+  message   String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([level])
+  @@index([createdAt])
+}
+
+
+
+============================================================
+FILE: api/prisma/migrations/migration_lock.toml
+============================================================
+# Please do not edit this file manually
+# It should be added in your version-control system (e.g., Git)
+provider = "postgresql"
+
+
+
+============================================================
+FILE: api/prisma/migrations/20260415184602_first_one/migration.sql
+============================================================
+/*
+  Warnings:
+
+  - A unique constraint covering the columns `[externalId]` on the table `Message` will be added. If there are existing duplicate values, this will fail.
+
+*/
+-- AlterTable
+ALTER TABLE "Message" ADD COLUMN     "externalId" TEXT;
+
+-- CreateTable
+CREATE TABLE "Log" (
+    "id" TEXT NOT NULL,
+    "level" TEXT NOT NULL,
+    "message" TEXT NOT NULL,
+    "metadata" JSONB,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Log_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Message_externalId_key" ON "Message"("externalId");
+
+
+
+============================================================
+FILE: api/prisma/migrations/20260210182955_init/migration.sql
+============================================================
+-- CreateTable
+CREATE TABLE "User" (
+    "id" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "password" TEXT NOT NULL,
+    "tenantId" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Tenant" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Tenant_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Conversation" (
+    "id" TEXT NOT NULL,
+    "tenantId" TEXT NOT NULL,
+    "phone" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'AUTO',
+    "frictionScore" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Conversation_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Message" (
+    "id" TEXT NOT NULL,
+    "conversationId" TEXT NOT NULL,
+    "direction" TEXT NOT NULL,
+    "content" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Message_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Appointment" (
+    "id" TEXT NOT NULL,
+    "tenantId" TEXT NOT NULL,
+    "patientName" TEXT NOT NULL,
+    "phone" TEXT NOT NULL,
+    "date" TIMESTAMP(3) NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'SCHEDULED',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Appointment_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
+
+-- AddForeignKey
+ALTER TABLE "User" ADD CONSTRAINT "User_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Conversation" ADD CONSTRAINT "Conversation_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Message" ADD CONSTRAINT "Message_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "Conversation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Appointment" ADD CONSTRAINT "Appointment_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+
+
+============================================================
+FILE: api/prisma/migrations/20260415222515_add_outbound_id/migration.sql
+============================================================
+/*
+  Warnings:
+
+  - A unique constraint covering the columns `[outboundId]` on the table `Message` will be added. If there are existing duplicate values, this will fail.
+
+*/
+-- AlterTable
+ALTER TABLE "Message" ADD COLUMN     "outboundId" TEXT;
+
+-- CreateIndex
+CREATE INDEX "Conversation_tenantId_phone_idx" ON "Conversation"("tenantId", "phone");
+
+-- CreateIndex
+CREATE INDEX "Log_level_idx" ON "Log"("level");
+
+-- CreateIndex
+CREATE INDEX "Log_createdAt_idx" ON "Log"("createdAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Message_outboundId_key" ON "Message"("outboundId");
+
+-- CreateIndex
+CREATE INDEX "Message_conversationId_idx" ON "Message"("conversationId");
+
+-- CreateIndex
+CREATE INDEX "Message_externalId_idx" ON "Message"("externalId");
+
+-- CreateIndex
+CREATE INDEX "Message_createdAt_idx" ON "Message"("createdAt");
+
+
+
+============================================================
+FILE: api/src/app.ts
+============================================================
+import express, { Request, Response, NextFunction } from "express";
+import cors from "cors";
+import { logger } from "./lib/logger";
+
+export function buildApp(webhookRoutes: express.Router) {
+  const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+// Routes
+app.use(webhookRoutes);
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Global error handler — must be AFTER all routes
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+  logger.error({
+    msg: "unhandled_error",
+    error: err.message,
+    stack: err.stack,
+  });
+
+  res.status(500).json({
+    error: "Internal Server Error",
+  });
+});
+  return app;
+}
+
+
+
+============================================================
+FILE: api/src/server.ts
+============================================================
+import "dotenv/config";
+
+import { buildApp } from "./app";
+import { prisma } from "./lib/prisma";
+import { logger } from "./lib/logger";
+
+// Repositories
+import {
+  PrismaConversationRepository,
+  PrismaMessageRepository,
+  PrismaTenantRepository,
+  PrismaAppointmentRepository,
+  PrismaLogRepository
+} from "./infrastructure/persistence/PrismaRepositories";
+import { RedisRateLimiter } from "./infrastructure/redis/RedisRateLimiter";
+
+// Services and Domain
+import { CloudAPIProvider } from "./providers/whatsapp/CloudAPIProvider";
+import { MockWhatsAppProvider } from "./providers/whatsapp/MockWhatsAppProvider";
+import { WhatsAppService } from "./modules/whatsapp/service";
+import { SchedulingService } from "./modules/scheduling/service";
+import { ConversationService } from "./modules/conversations/ConversationService";
+import { MessageService } from "./modules/conversations/MessageService";
+import { IntentService } from "./modules/conversations/IntentService";
+import { ConversationFlowService } from "./modules/conversations/ConversationFlowService";
+import { ResponseService } from "./modules/conversations/ResponseService";
+import { PromptService } from "./modules/ai/promptService";
+
+// Use cases & Http
+import { ProcessIncomingMessageUseCase } from "./application/useCases/ProcessIncomingMessageUseCase";
+import { WebhookController } from "./modules/webhook/WebhookController";
+import { buildWebhookRoutes } from "./routes/webhook";
+import { startIncomingMessageWorker, startOutboundMessageWorker } from "./application/workers/messageWorker";
+import { ConversationStateService } from "./domain/conversation/ConversationStateService";
+import { startCronJobs } from "./interfaces/cron/scheduler";
+
+async function bootstrap() {
+  const whatsappProvider = process.env.NODE_ENV === "production" 
+    ? new CloudAPIProvider() 
+    : new MockWhatsAppProvider();
+
+  const whatsappService = new WhatsAppService(whatsappProvider);
+  const promptService = new PromptService();
+
+  const conversationRepo = new PrismaConversationRepository(prisma);
+  const messageRepo = new PrismaMessageRepository(prisma);
+  const tenantRepo = new PrismaTenantRepository(prisma);
+  const appointmentRepo = new PrismaAppointmentRepository(prisma);
+  const logRepo = new PrismaLogRepository(prisma);
+  const rateLimiter = new RedisRateLimiter();
+  const stateService = new ConversationStateService(conversationRepo);
+
+  const schedulingService = new SchedulingService(whatsappService, appointmentRepo, logRepo);
+  
+  const conversationService = new ConversationService(conversationRepo);
+  const messageService = new MessageService(messageRepo);
+  const intentService = new IntentService();
+  const flowService = new ConversationFlowService(stateService);
+  const responseService = new ResponseService();
+
+  const processMessageUseCase = new ProcessIncomingMessageUseCase(
+    tenantRepo,
+    rateLimiter,
+    conversationService,
+    messageService,
+    intentService,
+    flowService,
+    responseService
+  );
+  const webhookController = new WebhookController();
+  
+  // Start Queue Workers
+  startIncomingMessageWorker(processMessageUseCase);
+  startOutboundMessageWorker(messageRepo, whatsappService);
+
+  // Start crons
+  startCronJobs(schedulingService, logRepo);
+
+  const webhookRoutes = buildWebhookRoutes(webhookController);
+  const app = buildApp(webhookRoutes);
+
+  // start server
+  const PORT = process.env.PORT || 3000;
+
+  const server = app.listen(PORT, () => {
+    logger.info({ msg: "clinicos_running", port: PORT });
+  });
+
+  const shutdown = async () => {
+    logger.info({ msg: "shutting_down" });
+
+    server.close(() => {
+      logger.info({ msg: "http_server_closed" });
+    });
+
+    await prisma.$disconnect();
+    logger.info({ msg: "database_disconnected" });
+
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  process.on("unhandledRejection", (reason) => {
+    logger.error({ msg: "unhandled_rejection", error: reason });
+  });
+
+  process.on("uncaughtException", (error) => {
+    logger.error({ msg: "uncaught_exception", error });
+    process.exit(1);
+  });
+}
+
+bootstrap().catch(err => {
+  logger.error({ msg: "bootstrap_failed", error: err });
+  process.exit(1);
+});
+
+
+
+============================================================
+FILE: api/src/application/queues/messageQueue.ts
+============================================================
+import { Queue } from "bullmq";
+import { redisClient } from "../../infrastructure/redis/client";
+
+export const incomingMessageQueue = new Queue("incoming-message", {
+  connection: redisClient,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: "exponential", delay: 1000 },
+  },
+});
+
+export const outboundMessageQueue = new Queue("outbound-message", {
+  connection: redisClient,
+  defaultJobOptions: {
+    attempts: 5,
+    backoff: { type: "exponential", delay: 2000 },
+  },
+});
+
+
+
+============================================================
+FILE: api/src/application/workers/messageWorker.ts
+============================================================
+import { Worker } from "bullmq";
+import { redisClient } from "../../infrastructure/redis/client";
+import { ProcessIncomingMessageUseCase } from "../useCases/ProcessIncomingMessageUseCase";
+import { IMessageRepository } from "../interfaces/repositories";
+import { logger } from "../../lib/logger";
+import { handleStatus } from "../../modules/webhook/handlers/handleStatus";
+
+export function startIncomingMessageWorker(useCase: ProcessIncomingMessageUseCase) {
+  const worker = new Worker("incoming-message", async (job) => {
+    const value = job.data;
+    await handleStatus(value);
+    await useCase.execute(value);
+  }, { connection: redisClient });
+
+  worker.on("failed", (job, err) => {
+    logger.error({ msg: "incoming_message_worker_failed", jobId: job?.id, error: err });
+  });
+
+  return worker;
+}
+
+export function startOutboundMessageWorker(messageRepo: IMessageRepository, whatsappService: any) {
+  const worker = new Worker("outbound-message", async (job) => {
+    const { messageId, phone, content } = job.data;
+
+    try {
+      await whatsappService.sendMessage({ type: "text", to: phone, text: content });
+      await messageRepo.updateStatus(messageId, "SENT");
+    } catch (error) {
+      await messageRepo.updateStatus(messageId, "FAILED");
+      throw error; // Let BullMQ retry based on queue settings
+    }
+  }, { connection: redisClient });
+
+  worker.on("failed", (job, err) => {
+    logger.error({ msg: "outbound_message_worker_failed", jobId: job?.id, error: err });
+  });
+
+  return worker;
+}
+
+
+
+============================================================
+FILE: api/src/application/interfaces/IRateLimiter.ts
+============================================================
+export interface IRateLimiter {
+  checkLimit(key: string): Promise<boolean>;
+}
+
+
+
+============================================================
+FILE: api/src/application/interfaces/repositories.ts
+============================================================
+import { Conversation, Message, Tenant, Appointment, Log, Prisma } from "@prisma/client";
+
+export interface IConversationRepository {
+  findByPhone(tenantId: string, phone: string): Promise<Conversation | null>;
+  create(data: { tenantId: string; phone: string; status: any }): Promise<Conversation>;
+  updateStatus(id: string, status: any): Promise<Conversation>;
+}
+
+export interface IMessageRepository {
+  create(data: {
+    conversationId: string;
+    direction: any;
+    content: string;
+    externalId?: string | null;
+    outboundId?: string | null;
+    status?: string;
+  }): Promise<Message>;
+  findByOutboundId(outboundId: string): Promise<Message | null>;
+  updateStatus(id: string, status: string): Promise<Message>;
+}
+
+export interface ITenantRepository {
+  findByPhoneNumberId(phoneNumberId: string): Promise<Tenant | null>;
+}
+
+export interface IAppointmentRepository {
+  findForTomorrow(tenantId?: string): Promise<(Appointment & { tenant?: Tenant })[]>;
+  create(data: { tenantId: string; patientName: string; phone: string; date: Date }): Promise<Appointment>;
+  countConflicts(tenantId: string, start: Date, end: Date): Promise<number>;
+}
+
+export interface ILogRepository {
+  deleteOlderThan(date: Date): Promise<void>;
+}
+
+
+
+
+============================================================
+FILE: api/src/application/useCases/ProcessIncomingMessageUseCase.ts
+============================================================
+import { logger } from "../../lib/logger";
+import crypto from "crypto";
+import { asyncLocalStorage, RequestContext } from "../../lib/requestContext";
+import { ITenantRepository } from "../interfaces/repositories";
+import { ConversationService } from "../../modules/conversations/ConversationService";
+import { MessageService } from "../../modules/conversations/MessageService";
+import { IntentService } from "../../modules/conversations/IntentService";
+import { ConversationFlowService } from "../../modules/conversations/ConversationFlowService";
+import { ResponseService } from "../../modules/conversations/ResponseService";
+import { IRateLimiter } from "../interfaces/IRateLimiter";
+import { ConversationStatus } from "../../modules/conversations/types";
+
+export class ProcessIncomingMessageUseCase {
+  constructor(
+    private tenantRepo: ITenantRepository,
+    private rateLimiter: IRateLimiter,
+    private conversationService: ConversationService,
+    private messageService: MessageService,
+    private intentService: IntentService,
+    private flowService: ConversationFlowService,
+    private responseService: ResponseService
+  ) {}
+
+  async execute(value: any) {
+    if (!value?.messages || value.messages.length === 0) return;
+
+    const message = value.messages[0];
+    const requestId = value.requestId || "req-" + Date.now();
+
+    if (!message?.text?.body || !message?.from) {
+      logger.warn({
+        event: "message.invalid_payload",
+        requestId,
+        payload: {
+          hasText: !!message.text?.body,
+          from: message.from,
+        },
+      });
+      return;
+    }
+
+    const messageId: string = message.id;
+    const phone: string = message.from;
+    const text: string = message.text.body;
+    const phoneNumberId = value.metadata?.phone_number_id;
+
+    if (!phoneNumberId) {
+      logger.warn({ event: "missing_phone_number_id", value });
+      return;
+    }
+
+    const tenant = await this.tenantRepo.findByPhoneNumberId(phoneNumberId);
+
+    if (!tenant) {
+      logger.warn({ event: "tenant_not_found", phoneNumberId });
+      return;
+    }
+
+    const tenantId = tenant.id;
+
+    const context: RequestContext = {
+      requestId,
+      messageId,
+      phone,
+      tenantId,
+    };
+
+    await asyncLocalStorage.run(context, async () => {
+      const start = Date.now();
+      try {
+        if (!(await this.rateLimiter.checkLimit(phone))) return;
+
+        logger.info({
+          event: "message.received",
+          content: text,
+        });
+
+        const conversation = await this.conversationService.getOrCreate(tenantId, phone);
+
+        const saved = await this.messageService.saveInbound(conversation.id, text, messageId);
+        if (!saved) return; // duplicate
+
+        logger.info({
+          event: "message.persisted",
+          conversationId: conversation.id,
+        });
+
+        const currentAction = conversation.status;
+        logger.info({
+          event: "message.action",
+          action: currentAction,
+        });
+
+        if (currentAction === ConversationStatus.HUMAN) {
+           logger.info({
+            event: "message.processed",
+            phone,
+            success: true,
+          });
+          return;
+        }
+
+        const classification = this.intentService.classify(text, tenantId);
+
+        const flowDecision = await this.flowService.decide(conversation, classification);
+
+        logger.info({
+          event: "message.classified",
+          intent: classification.intent,
+          priority: classification.priority,
+          action: flowDecision.action,
+          score: classification.score,
+        });
+
+        // Don't auto-respond if escalated to HUMAN
+        if (flowDecision.action === ConversationStatus.HUMAN) {
+           return;
+        }
+
+        const responseText = await this.responseService.generate(classification.intent, tenantId, phone, text);
+
+        logger.info({
+          event: "message.response",
+          response: responseText,
+        });
+
+        const windowMinutes = Math.floor(Date.now() / 60000);
+        const hashString = `${phone}-${responseText}-${windowMinutes}`;
+        const outboundId = crypto
+          .createHash("sha256")
+          .update(hashString)
+          .digest("hex");
+
+        await this.messageService.saveOutbound(conversation.id, responseText, outboundId, phone);
+
+        logger.info({
+          event: "message.processed",
+          phone,
+          success: true,
+        });
+
+      } catch (error) {
+        logger.error({
+          event: "webhook.error",
+          error,
+        });
+      } finally {
+        const durationMs = Date.now() - start;
+        logger.info({
+          event: "message.done",
+          durationMs,
+        });
+      }
+    });
+  }
+}
+
+
+
+============================================================
+FILE: api/src/routes/webhook.ts
+============================================================
+import { Router } from "express";
+import { WebhookController } from "../modules/webhook/WebhookController";
+import { env } from "../config/env";
+
+export function buildWebhookRoutes(controller: WebhookController): Router {
+  const router = Router();
+
+  router.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === env.VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+
+  return res.sendStatus(403);
+});
+
+  router.post("/webhook", (req, res) => controller.handle(req, res));
+
+  return router;
+}
+
+
+
+============================================================
+FILE: api/src/prompts/suggest.txt
+============================================================
+Suggest options based on user context.
+
+
+
+============================================================
+FILE: api/src/prompts/respond.txt
+============================================================
+You are a helpful virtual assistant. Respond to the user naturally.
+
+
+
+============================================================
+FILE: api/src/prompts/classify.txt
+============================================================
+You are an AI assistant. Classify the user intent.
+
+
+
+============================================================
+FILE: api/src/config/env.ts
+============================================================
+import dotenv from "dotenv";
+dotenv.config();
+
+function getEnv(name: string): string {
+  const value = process.env[name];
+  if (!value && process.env.NODE_ENV === "production") {
+    throw new Error(`Missing env var: ${name}`);
+  }
+  return value || "";
+}
+
+export const env = {
+  WHATSAPP_TOKEN: getEnv("WHATSAPP_TOKEN"),
+  WHATSAPP_PHONE_NUMBER_ID: getEnv("WHATSAPP_PHONE_NUMBER_ID"),
+  DATABASE_URL: getEnv("DATABASE_URL"),
+  VERIFY_TOKEN: process.env.VERIFY_TOKEN || "clinic_os_token",
+};
+
+
+
+============================================================
+FILE: api/src/lib/prisma.ts
+============================================================
+import { PrismaClient } from "@prisma/client";
+import { logger } from "./logger";
+
+const basePrisma = new PrismaClient();
+
+export const prisma = basePrisma.$extends({
+  query: {
+    $allModels: {
+      async $allOperations({ model, operation, args, query }) {
+        const start = Date.now();
+        const result = await query(args);
+        const durationMs = Date.now() - start;
+        logger.debug({ msg: "db_query", model, operation, durationMs });
+        return result;
+      },
+    },
+  },
+}) as unknown as PrismaClient; // Cast to PrismaClient to avoid massive type refactors everywhere
+
+
+
+============================================================
+FILE: api/src/lib/errors.ts
+============================================================
+export class AppError extends Error {
+  constructor(
+    public message: string,
+    public statusCode: number = 500,
+  ) {
+    super(message);
+  }
+}
+
+
+
+============================================================
+FILE: api/src/lib/requestContext.ts
+============================================================
+import { AsyncLocalStorage } from "node:async_hooks";
+
+export interface RequestContext {
+  requestId: string;
+  messageId?: string;
+  phone?: string;
+  tenantId?: string;
+}
+
+export const asyncLocalStorage = new AsyncLocalStorage<RequestContext>();
+
+export function getContext(): RequestContext | undefined {
+  return asyncLocalStorage.getStore();
+}
+
+
+
+============================================================
+FILE: api/src/lib/logger.ts
+============================================================
+import pino from "pino";
+import { getContext } from "./requestContext";
+
+const baseLogger = pino({
+  level: process.env.LOG_LEVEL || "info",
+  transport:
+    process.env.NODE_ENV !== "production"
+      ? {
+          target: "pino-pretty",
+          options: {
+            colorize: true,
+            translateTime: "HH:MM:ss Z",
+            ignore: "pid,hostname",
+            singleLine: false,
+          },
+        }
+      : undefined,
+});
+
+function serializeError(error: any) {
+  if (!(error instanceof Error)) return error;
+
+  const isAxiosError =
+    (error as any).isAxiosError ||
+    ((error as any).response && (error as any).config);
+
+  return {
+    type: error.name || "Error",
+    name: error.name,
+    message: error.message,
+    ...(isAxiosError
+      ? {
+          status: (error as any).response?.status,
+          responseData: (error as any).response?.data,
+          url: (error as any).config?.url,
+        }
+      : {}),
+    stack: error.stack,
+  };
+}
+
+function injectContext(obj: Record<string, any>): Record<string, any> {
+  const ctx = getContext();
+  if (!ctx) return { ...obj };
+
+  return {
+    ...obj,
+    ...(ctx.requestId && { requestId: ctx.requestId }),
+    ...(ctx.messageId && { messageId: ctx.messageId }),
+    ...(ctx.phone && { phone: ctx.phone }),
+    ...(ctx.tenantId && { tenantId: ctx.tenantId }),
+  };
+}
+
+
+export const logger = {
+  info(obj: Record<string, any>): void {
+    const data = injectContext(obj);
+    baseLogger.info(data);
+  },
+
+  warn(obj: Record<string, any>): void {
+    const data = injectContext(obj);
+    if (data.error) data.error = serializeError(data.error);
+    baseLogger.warn(data);
+  },
+
+  error(obj: Record<string, any>): void {
+    const data = injectContext(obj);
+    if (data.error) data.error = serializeError(data.error);
+    baseLogger.error(data);
+  },
+
+  debug(obj: Record<string, any>): void {
+    const data = injectContext(obj);
+    baseLogger.debug(data);
+  },
+};
+
+
+
+============================================================
+FILE: api/src/scripts/simulateMessage.ts
+============================================================
+import { randomUUID } from "crypto";
+import { ConversationService } from "../modules/conversations/ConversationService";
+import { MessageService } from "../modules/conversations/MessageService";
+import { IntentService } from "../modules/conversations/IntentService";
+import { ConversationFlowService } from "../modules/conversations/ConversationFlowService";
+import { ResponseService } from "../modules/conversations/ResponseService";
+import { PrismaConversationRepository, PrismaMessageRepository } from "../infrastructure/persistence/PrismaRepositories";
+import { RedisRateLimiter } from "../infrastructure/redis/RedisRateLimiter";
+import { ConversationStateService } from "../domain/conversation/ConversationStateService";
+import { ConversationStatus } from "../modules/conversations/types";
+import { logger } from "../lib/logger";
+import { prisma } from "../lib/prisma";
+
+async function simulate() {
+  const args = process.argv.slice(2);
+  if (args.length < 2) {
+    console.error("Usage: npm run simulate <phone> <message>");
+    process.exit(1);
+  }
+
+  const phone = args[0];
+  const messageText = args.slice(1).join(" ");
+  
+  // ensure we have a phone_number_id. For testing, we mock it.
+  const mockPhoneNumberId = "mock-phone-id-123";
+
+  // Upsert standard tenant for the simulator matching the mock phone number ID
+  const tenant = await prisma.tenant.upsert({
+    where: { phoneNumberId: mockPhoneNumberId },
+    update: {},
+    create: {
+      name: "Local Dev Tenant",
+      phoneNumberId: mockPhoneNumberId,
+    }
+  });
+
+  logger.info({
+    msg: "simulation",
+    phone,
+    message: messageText
+  });
+
+  // Note: webhookHandler might be fire-and-forget in production,
+  // but for simulation we might want to call the engine directly to get the response.
+  // Wait, if webhookHandler doesn't return the response, we can directly call the engine here for simulation
+  // since the prompt instructs to 'Add clear output: Incoming... Response...'.
+  const conversationRepo = new PrismaConversationRepository(prisma);
+  const messageRepo = new PrismaMessageRepository(prisma);
+  const rateLimiter = new RedisRateLimiter();
+  const stateService = new ConversationStateService(conversationRepo);
+  
+  const conversationService = new ConversationService(conversationRepo);
+  const messageService = new MessageService(messageRepo);
+  const intentService = new IntentService();
+  const flowService = new ConversationFlowService(stateService);
+  const responseService = new ResponseService();
+
+  console.log(`\n📩 Incoming: ${messageText}`);
+
+  if (!(await rateLimiter.checkLimit(phone))) return;
+
+  const conversation = await conversationService.getOrCreate(tenant.id, phone);
+  const wamid = `wamid.mock.${randomUUID()}`;
+
+  const saved = await messageService.saveInbound(conversation.id, messageText, wamid);
+  if (!saved) return;
+
+  const classification = intentService.classify(messageText, tenant.id);
+  const flowDecision = await flowService.decide(conversation, classification);
+
+  if (flowDecision.action === ConversationStatus.HUMAN) {
+    console.log(`🤖 Action taken: HUMAN\n`);
+  } else {
+    const responseText = await responseService.generate(classification.intent, tenant.id, phone, messageText);
+    const hashString = `${phone}-${responseText}-${Math.floor(Date.now() / 60000)}`;
+    const outboundId = randomUUID();
+    await messageService.saveOutbound(conversation.id, responseText, outboundId, phone);
+    console.log(`🤖 Response: ${responseText}\n`);
+  }
+}
+
+simulate().catch((error) => {
+  logger.error({ msg: "simulation_failed", error });
+  process.exit(1);
+});
+
+
+
+============================================================
+FILE: api/src/scripts/chat.ts
+============================================================
+import readline from "readline";
+import { randomUUID } from "crypto";
+import { ConversationService } from "../modules/conversations/ConversationService";
+import { MessageService } from "../modules/conversations/MessageService";
+import { IntentService } from "../modules/conversations/IntentService";
+import { ConversationFlowService } from "../modules/conversations/ConversationFlowService";
+import { ResponseService } from "../modules/conversations/ResponseService";
+import { PrismaConversationRepository, PrismaMessageRepository } from "../infrastructure/persistence/PrismaRepositories";
+import { RedisRateLimiter } from "../infrastructure/redis/RedisRateLimiter";
+import { ConversationStateService } from "../domain/conversation/ConversationStateService";
+import { ConversationStatus } from "../modules/conversations/types";
+import { prisma } from "../lib/prisma";
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+async function runChat() {
+  const phone = "551999999999";
+  const mockPhoneNumberId = "mock-phone-id-123";
+
+  // Ensure tenant exists
+  const tenant = await prisma.tenant.upsert({
+    where: { phoneNumberId: mockPhoneNumberId },
+    update: {},
+    create: {
+      name: "Local Dev Tenant",
+      phoneNumberId: mockPhoneNumberId,
+    },
+  });
+
+  const conversationRepo = new PrismaConversationRepository(prisma);
+  const messageRepo = new PrismaMessageRepository(prisma);
+  const rateLimiter = new RedisRateLimiter();
+  const stateService = new ConversationStateService(conversationRepo);
+  
+  const conversationService = new ConversationService(conversationRepo);
+  const messageService = new MessageService(messageRepo);
+  const intentService = new IntentService();
+  const flowService = new ConversationFlowService(stateService);
+  const responseService = new ResponseService();
+
+  console.log("💬 Chat iniciado (Digite 'sair' para encerrar)\n");
+
+  const promptUser = () => {
+    rl.question("Você: ", async (input) => {
+      if (input.toLowerCase() === "sair") {
+        rl.close();
+        return;
+      }
+
+      if (!input.trim()) {
+        promptUser();
+        return;
+      }
+
+      try {
+        if (!(await rateLimiter.checkLimit(phone))) return;
+
+        const conversation = await conversationService.getOrCreate(tenant.id, phone);
+        const wamid = `wamid.mock.${randomUUID()}`;
+        
+        const saved = await messageService.saveInbound(conversation.id, input, wamid);
+        if (!saved) return;
+
+        const classification = intentService.classify(input, tenant.id);
+        const flowDecision = await flowService.decide(conversation, classification);
+
+        if (flowDecision.action === ConversationStatus.HUMAN) {
+          console.log(`🤖 Ação: HUMAN\n`);
+        } else {
+          const responseText = await responseService.generate(classification.intent, tenant.id, phone, input);
+          const hashString = `${phone}-${responseText}-${Math.floor(Date.now() / 60000)}`;
+          const outboundId = randomUUID();
+          await messageService.saveOutbound(conversation.id, responseText, outboundId, phone);
+          console.log(`🤖 ${responseText}\n`);
+        }
+      } catch (error) {
+        console.error("Erro no processamento:", error);
+      }
+
+      promptUser();
+    });
+  };
+
+  promptUser();
+}
+
+runChat().catch((err) => {
+  console.error("Critical error:", err);
+  process.exit(1);
+});
+
+
+
+============================================================
+FILE: api/src/infrastructure/persistence/PrismaRepositories.ts
+============================================================
+import { PrismaClient, Conversation, Message, Tenant, Appointment, Log, Prisma } from "@prisma/client";
+import {
+  IConversationRepository,
+  IMessageRepository,
+  ITenantRepository,
+  IAppointmentRepository,
+  ILogRepository
+} from "../../application/interfaces/repositories";
+
+export class PrismaConversationRepository implements IConversationRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async findByPhone(tenantId: string, phone: string): Promise<Conversation | null> {
+    return this.prisma.conversation.findFirst({
+      where: { tenantId, phone },
+    });
+  }
+
+  async create(data: { tenantId: string; phone: string; status: any }): Promise<Conversation> {
+    return this.prisma.conversation.create({
+      data,
+    });
+  }
+
+  async updateStatus(id: string, status: any): Promise<Conversation> {
+    return this.prisma.conversation.update({
+      where: { id },
+      data: { status }
+    });
+  }
+}
+
+export class PrismaMessageRepository implements IMessageRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async create(data: {
+    conversationId: string;
+    direction: any;
+    content: string;
+    externalId?: string | null;
+    outboundId?: string | null;
+    status?: string;
+  }): Promise<Message> {
+    return this.prisma.message.create({
+      data,
+    });
+  }
+
+  async findByOutboundId(outboundId: string): Promise<Message | null> {
+    return this.prisma.message.findUnique({
+      where: { outboundId },
+    });
+  }
+
+  async updateStatus(id: string, status: string): Promise<Message> {
+    return this.prisma.message.update({
+      where: { id },
+      data: { status },
+    });
+  }
+}
+
+export class PrismaTenantRepository implements ITenantRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async findByPhoneNumberId(phoneNumberId: string): Promise<Tenant | null> {
+    return this.prisma.tenant.findUnique({
+      where: { phoneNumberId },
+    });
+  }
+}
+
+export class PrismaAppointmentRepository implements IAppointmentRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async findForTomorrow(tenantId?: string): Promise<(Appointment & { tenant?: Tenant })[]> {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+
+    const afterTomorrow = new Date(tomorrow);
+    afterTomorrow.setDate(tomorrow.getDate() + 1);
+
+    return this.prisma.appointment.findMany({
+      where: {
+        ...(tenantId ? { tenantId } : {}),
+        date: { gte: tomorrow, lt: afterTomorrow },
+        status: "SCHEDULED"
+      },
+      take: 500,
+      include: { tenant: true }
+    });
+  }
+
+  async countConflicts(tenantId: string, start: Date, end: Date): Promise<number> {
+    return this.prisma.appointment.count({
+      where: {
+        tenantId,
+        date: { gte: start, lt: end }
+      }
+    });
+  }
+
+  async create(data: { tenantId: string; patientName: string; phone: string; date: Date }): Promise<Appointment> {
+    return this.prisma.appointment.create({ data });
+  }
+}
+
+export class PrismaLogRepository implements ILogRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async deleteOlderThan(date: Date): Promise<void> {
+    await this.prisma.log.deleteMany({
+      where: { createdAt: { lt: date } }
+    });
+  }
+}
+
+
+
+============================================================
+FILE: api/src/infrastructure/redis/RedisRateLimiter.ts
+============================================================
+import { IRateLimiter } from "../../application/interfaces/IRateLimiter";
+import { redisClient } from "./client";
+
+export class RedisRateLimiter implements IRateLimiter {
+  private readonly limitWindowMs = 10000;
+  private readonly maxAllowed = 15;
+
+  async checkLimit(key: string): Promise<boolean> {
+    const redisKey = `ratelimit:${key}`;
+    const count = await redisClient.incr(redisKey);
+    
+    if (count === 1) {
+      await redisClient.pexpire(redisKey, this.limitWindowMs);
+    }
+
+    return count <= this.maxAllowed;
+  }
+}
+
+
+
+============================================================
+FILE: api/src/infrastructure/redis/client.ts
+============================================================
+import { Redis } from "ioredis";
+import { logger } from "../../lib/logger";
+
+export const redisClient = new Redis(process.env.REDIS_URL || "redis://localhost:6379", {
+  maxRetriesPerRequest: null,
+});
+
+redisClient.on("error", (err) => {
+  logger.error({ msg: "redis_error", error: err });
+});
+
+
+
+============================================================
+FILE: api/src/providers/whatsapp/CloudAPIProvider.ts
+============================================================
+import { IWhatsAppProvider, OutboundMessage } from "./IWhatsAppProvider";
+import { env } from "../../config/env";
+import { logger } from "../../lib/logger";
+
+const MAX_RETRIES = 2;
+const TIMEOUT_MS = 5000;
+
+export class CloudAPIProvider implements IWhatsAppProvider {
+  private token: string;
+  private phoneNumberId: string;
+  private apiUrl: string;
+
+  constructor() {
+    this.token = env.WHATSAPP_TOKEN;
+    this.phoneNumberId = env.WHATSAPP_PHONE_NUMBER_ID;
+
+    this.apiUrl =
+      process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v25.0";
+  }
+
+  async sendMessage(payload: OutboundMessage) {
+    const number = payload.to.replace(/\D/g, "");
+    const url = `${this.apiUrl}/${this.phoneNumberId}/messages`;
+
+    const headers = {
+      Authorization: `Bearer ${this.token}`,
+      "Content-Type": "application/json",
+    };
+
+    let bodyObj: any = {
+      messaging_product: "whatsapp",
+      to: number,
+    };
+
+    if (payload.type === "text") {
+      bodyObj.type = "text";
+      bodyObj.text = { body: payload.text };
+    } else if (payload.type === "reply") {
+      bodyObj.type = "text";
+      bodyObj.text = { body: payload.text };
+      bodyObj.context = { message_id: payload.replyToMessageId };
+    } else if (payload.type === "audio") {
+      bodyObj.type = "audio";
+      bodyObj.audio = { link: payload.url };
+    } else if (payload.type === "media") {
+      bodyObj.type = "image";
+      bodyObj.image = { link: payload.url, caption: payload.caption };
+    }
+
+    const body = JSON.stringify(bodyObj);
+
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+      try {
+        logger.info({
+          msg: "whatsapp_send_attempt",
+          to: number,
+          attempt,
+        });
+
+        const response = await fetch(url, {
+          method: "POST",
+          headers,
+          body,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          logger.error({
+            msg: "whatsapp_api_error",
+            statusCode: response.status,
+            data,
+            to: number,
+            attempt,
+          });
+
+          // DO NOT retry on 4xx — client errors are not transient
+          if (response.status >= 400 && response.status < 500) {
+            throw new Error(
+              data?.error?.message || "Failed to send WhatsApp message",
+            );
+          }
+
+          lastError = new Error(
+            data?.error?.message || "Failed to send WhatsApp message",
+          );
+          continue;
+        }
+
+        logger.info({
+          msg: "whatsapp_message_sent",
+          to: number,
+          attempt,
+        });
+
+        return data;
+      } catch (error: unknown) {
+        clearTimeout(timeout);
+        lastError = error;
+
+        // If it's an AbortError or network error, retry
+        const isAbort =
+          error instanceof Error && error.name === "AbortError";
+        const isNetworkError =
+          error instanceof TypeError &&
+          error.message.includes("fetch");
+
+        if (!isAbort && !isNetworkError) {
+          // Non-retryable error (e.g. 4xx threw above)
+          logger.error({
+            msg: "whatsapp_request_failed",
+            error,
+            to: number,
+            attempt,
+          });
+          throw error;
+        }
+
+        logger.warn({
+          msg: "whatsapp_retry",
+          to: number,
+          attempt,
+          reason: isAbort ? "timeout" : "network_error",
+        });
+
+        if (attempt <= MAX_RETRIES) {
+          const delay = 500 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    logger.error({
+      msg: "whatsapp_all_retries_exhausted",
+      to: number,
+      maxRetries: MAX_RETRIES,
+    });
+
+    throw lastError;
+  }
+}
+
+
+
+============================================================
+FILE: api/src/providers/whatsapp/MockWhatsAppProvider.ts
+============================================================
+import { IWhatsAppProvider, OutboundMessage } from "./IWhatsAppProvider";
+import { logger } from "../../lib/logger";
+
+export class MockWhatsAppProvider implements IWhatsAppProvider {
+  async sendMessage(payload: OutboundMessage) {
+    logger.info({
+      msg: "mock_whatsapp_message_sent",
+      payload,
+    });
+    return { status: "ok" };
+  }
+}
+
+
+
+============================================================
+FILE: api/src/providers/whatsapp/IWhatsAppProvider.ts
+============================================================
+export type OutboundMessage = 
+  | { type: "text"; to: string; text: string }
+  | { type: "audio"; to: string; url: string }
+  | { type: "media"; to: string; url: string; caption?: string }
+  | { type: "reply"; to: string; text: string; replyToMessageId: string };
+
+export interface IWhatsAppProvider {
+  sendMessage(payload: OutboundMessage): Promise<any>;
+}
+
+
+
+============================================================
+FILE: api/src/domain/intent/IIntentHandler.ts
+============================================================
+export interface IIntentHandler {
+  handle(context: {
+    tenantId: string;
+    phone: string;
+    content: string;
+    intent: string;
+  }): Promise<string>;
+}
+
+
+
+============================================================
+FILE: api/src/domain/intent/IntentHandlerRegistry.ts
+============================================================
+import { IIntentHandler } from "./IIntentHandler";
+import { ScheduleIntentHandler } from "./handlers/ScheduleIntentHandler";
+import { DefaultIntentHandler } from "./handlers/DefaultIntentHandler";
+import { EmergencyIntentHandler } from "./handlers/EmergencyIntentHandler";
+
+export class IntentHandlerRegistry {
+  private handlers = new Map<string, IIntentHandler>();
+  private defaultHandler: IIntentHandler;
+
+  constructor() {
+    this.defaultHandler = new DefaultIntentHandler();
+    this.handlers.set("SCHEDULE", new ScheduleIntentHandler());
+    this.handlers.set("EMERGENCY", new EmergencyIntentHandler());
+  }
+
+  getHandler(intent: string): IIntentHandler {
+    return this.handlers.get(intent) || this.defaultHandler;
+  }
+}
+
+
+
+============================================================
+FILE: api/src/domain/intent/handlers/DefaultIntentHandler.ts
+============================================================
+import { IIntentHandler } from "../IIntentHandler";
+
+export class DefaultIntentHandler implements IIntentHandler {
+  async handle(context: { tenantId: string; phone: string; content: string; intent: string }): Promise<string> {
+    return "Olá! Sou o assistente virtual. Como posso ajudar?";
+  }
+}
+
+
+
+============================================================
+FILE: api/src/domain/intent/handlers/EmergencyIntentHandler.ts
+============================================================
+import { IIntentHandler } from "../IIntentHandler";
+
+export class EmergencyIntentHandler implements IIntentHandler {
+  async handle(context: { tenantId: string; phone: string; content: string; intent: string }): Promise<string> {
+    return "Por favor, dirija-se imediatamente ao pronto-socorro mais próximo ou ligue para o serviço de emergência.";
+  }
+}
+
+
+
+============================================================
+FILE: api/src/domain/intent/handlers/ScheduleIntentHandler.ts
+============================================================
+import { IIntentHandler } from "../IIntentHandler";
+
+export class ScheduleIntentHandler implements IIntentHandler {
+  async handle(context: { tenantId: string; phone: string; content: string; intent: string }): Promise<string> {
+    return "Para agendar, por favor informe a data e hora desejada.";
+  }
+}
+
+
+
+============================================================
+FILE: api/src/domain/conversation/ConversationStateService.ts
+============================================================
+import { IConversationRepository } from "../../application/interfaces/repositories";
+import { logger } from "../../lib/logger";
+
+export class ConversationStateService {
+  constructor(private conversationRepo: IConversationRepository) {}
+
+  async transitionToHuman(conversationId: string): Promise<void> {
+    logger.info({ event: "conversation.transition", status: "HUMAN", conversationId });
+    await this.conversationRepo.updateStatus(conversationId, "HUMAN");
+  }
+
+  async transitionToAuto(conversationId: string): Promise<void> {
+    logger.info({ event: "conversation.transition", status: "AUTO", conversationId });
+    await this.conversationRepo.updateStatus(conversationId, "AUTO");
+  }
+
+  async applyAction(conversationId: string, targetStatus: string): Promise<boolean> {
+    if (targetStatus === "HUMAN") {
+      await this.transitionToHuman(conversationId);
+      return true;
+    } else if (targetStatus === "AUTO") {
+      await this.transitionToAuto(conversationId);
+      return true;
+    }
+    return false;
+  }
+}
+
+
+
+============================================================
+FILE: api/src/interfaces/cron/scheduler.ts
+============================================================
+import cron from "node-cron";
+import { SchedulingService } from "../../modules/scheduling/service";
+import { PrismaLogRepository } from "../../infrastructure/persistence/PrismaRepositories";
+import { prisma } from "../../lib/prisma";
+import { logger } from "../../lib/logger";
+
+export function startCronJobs(
+  schedulingService: SchedulingService,
+  logRepo: PrismaLogRepository
+) {
+  // Todo dia 08:00
+  cron.schedule("0 8 * * *", async () => {
+    logger.info({ msg: "running_daily_reminders" });
+    await schedulingService.sendDailyReminders();
+  });
+
+  // Todo dia 03:00 (Log cleanup)
+  cron.schedule("0 3 * * *", async () => {
+    logger.info({ msg: "running_log_cleanup" });
+    try {
+      const threshold = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000); // 14 days
+      await logRepo.deleteOlderThan(threshold);
+    } catch (error) {
+      logger.error({ msg: "log_cleanup_failed", error });
+    }
+  });
+
+  logger.info({ msg: "cron_jobs_started" });
+}
+
+
+
+============================================================
+FILE: api/src/modules/ai/classifier.ts
+============================================================
+import { MessageIntent, MessagePriority } from "../conversations/types";
+
+interface ClassificationResult {
+  intent: string;
+  risk_level: string;
+}
+
+export function classifyMessage(message: string): ClassificationResult {
+  return {
+    intent: MessageIntent.UNKNOWN,
+    risk_level: MessagePriority.LOW,
+  };
+}
+
+
+
+============================================================
+FILE: api/src/modules/ai/promptService.ts
+============================================================
+import fs from "fs";
+import path from "path";
+
+export class PromptService {
+  private promptsDir: string;
+
+  constructor() {
+    this.promptsDir = path.resolve(__dirname, "../../../src/prompts");
+  }
+
+  getPrompt(name: string): string {
+    try {
+      const promptPath = path.join(this.promptsDir, `${name}.txt`);
+      return fs.readFileSync(promptPath, "utf-8");
+    } catch (error) {
+      throw new Error(`Failed to load prompt: ${name}`);
+    }
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/whatsapp/service.ts
+============================================================
+import { IWhatsAppProvider, OutboundMessage } from "../../providers/whatsapp/IWhatsAppProvider";
+
+export class WhatsAppService {
+  constructor(private provider: IWhatsAppProvider) {}
+
+  async sendMessage(payload: OutboundMessage) {
+    return this.provider.sendMessage(payload);
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/webhook/WebhookController.ts
+============================================================
+import { Request, Response } from "express";
+import { randomUUID } from "node:crypto";
+import { logger } from "../../lib/logger";
+import { incomingMessageQueue } from "../../application/queues/messageQueue";
+
+export class WebhookController {
+  constructor() {}
+
+  async handle(req: Request, res: Response) {
+    const value = req.body?.entry?.[0]?.changes?.[0]?.value;
+
+    // 1. Respond immediately
+    res.sendStatus(200);
+
+    // 2. Process async
+    if (value) {
+      const requestId = randomUUID();
+      const contextValue = { ...value, requestId };
+
+      // Push directly to queue
+      incomingMessageQueue.add("process-webhook", contextValue).catch((err) => {
+        logger.error({ msg: "webhook_enqueue_error", error: err });
+      });
+    }
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/webhook/handlers/handleStatus.ts
+============================================================
+import { logger } from "../../../lib/logger";
+
+export async function handleStatus(value: any) {
+  if (!value?.statuses || value.statuses.length === 0) return;
+
+  const status = value.statuses[0];
+  const requestId = value.requestId; // Expected to be injected by webhookHandler
+
+  if (status.status === "failed") {
+    logger.error({
+      event: "whatsapp.failed",
+      requestId,
+      status: status.status,
+      messageId: status.id,
+      recipient: status.recipient_id,
+      errors: status.errors ?? null,
+    });
+  } else {
+    ("");
+    logger.info({
+      event: "whatsapp.status",
+      requestId,
+      status: status.status,
+      messageId: status.id,
+      recipient: status.recipient_id,
+    });
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/ConversationService.ts
+============================================================
+import { IConversationRepository } from "../../application/interfaces/repositories";
+import { ConversationStatus } from "./types";
+
+export class ConversationService {
+  constructor(private conversationRepo: IConversationRepository) {}
+
+  async getOrCreate(tenantId: string, phone: string) {
+    let conversation = await this.conversationRepo.findByPhone(tenantId, phone);
+
+    if (!conversation) {
+      conversation = await this.conversationRepo.create({
+        tenantId,
+        phone,
+        status: ConversationStatus.AUTO
+      });
+    }
+
+    return conversation;
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/aiRouter.ts
+============================================================
+import { IntentLoader } from "./intent/intent.loader";
+import { IntentResolver } from "./intent/intent.resolver";
+import { AIClassification } from "./types";
+
+export class AIRouter {
+  private readonly resolver: IntentResolver;
+
+  constructor() {
+    const loader = new IntentLoader();
+    this.resolver = new IntentResolver(loader);
+  }
+
+  classify(
+    message: string,
+    debug = false,
+    tenantId?: string,
+  ): AIClassification {
+    return this.resolver.resolve(message);
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/IntentService.ts
+============================================================
+import { AIRouter } from "./aiRouter";
+import { AIClassification } from "./types";
+
+export class IntentService {
+  private aiRouter: AIRouter;
+
+  constructor() {
+    this.aiRouter = new AIRouter();
+  }
+
+  classify(content: string, tenantId: string): AIClassification {
+    return this.aiRouter.classify(content, false, tenantId);
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/ConversationFlowService.ts
+============================================================
+import { ConversationStateService } from "../../domain/conversation/ConversationStateService";
+import { AIClassification, ConversationStatus, MessagePriority } from "./types";
+
+export class ConversationFlowService {
+  constructor(private stateService: ConversationStateService) {}
+
+  async decide(conversation: any, classification: AIClassification) {
+    const currentStatus = conversation.status as ConversationStatus;
+
+    if (currentStatus === ConversationStatus.HUMAN) {
+      return { action: ConversationStatus.HUMAN };
+    }
+
+    if (classification.priority === MessagePriority.HIGH) {
+      await this.stateService.applyAction(conversation.id, ConversationStatus.HUMAN);
+      return { action: ConversationStatus.HUMAN };
+    }
+
+    const nextAction = classification.action || ConversationStatus.AUTO;
+
+    if (nextAction !== currentStatus) {
+      await this.stateService.applyAction(conversation.id, nextAction);
+    }
+
+    return { ...classification, action: nextAction };
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/ResponseService.ts
+============================================================
+import { IntentHandlerRegistry } from "../../domain/intent/IntentHandlerRegistry";
+import { MessageIntent } from "./types";
+
+export class ResponseService {
+  private intentRegistry: IntentHandlerRegistry;
+
+  constructor() {
+    this.intentRegistry = new IntentHandlerRegistry();
+  }
+
+  async generate(intent: MessageIntent, tenantId: string, phone: string, content: string): Promise<string> {
+    const handler = this.intentRegistry.getHandler(intent);
+    
+    return await handler.handle({
+      tenantId,
+      phone,
+      content,
+      intent
+    });
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/MessageService.ts
+============================================================
+import { IMessageRepository } from "../../application/interfaces/repositories";
+import { MessageDirection } from "./types";
+import { outboundMessageQueue } from "../../application/queues/messageQueue";
+
+export class MessageService {
+  constructor(private messageRepo: IMessageRepository) {}
+
+  async saveInbound(conversationId: string, content: string, externalId: string): Promise<boolean> {
+    try {
+      await this.messageRepo.create({
+        conversationId,
+        direction: MessageDirection.INBOUND,
+        content,
+        externalId: externalId || null,
+      });
+      return true;
+    } catch (error: any) {
+      if (error.code === "P2002") {
+        return false; // Duplicate
+      }
+      throw error;
+    }
+  }
+
+  async saveOutbound(conversationId: string, content: string, outboundId: string, phone: string): Promise<void> {
+    const exists = await this.messageRepo.findByOutboundId(outboundId);
+
+    if (!exists) {
+      const msg = await this.messageRepo.create({
+        conversationId,
+        direction: MessageDirection.OUTBOUND,
+        content,
+        outboundId,
+        status: "PENDING"
+      });
+
+      // Point 10: Enqueue after saving
+      await outboundMessageQueue.add("send-message", {
+        messageId: msg.id,
+        phone,
+        content
+      });
+    }
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/types.ts
+============================================================
+export enum ConversationStatus {
+  AUTO = "AUTO",
+  SUGGESTION = "SUGGESTION",
+  HUMAN = "HUMAN",
+}
+
+export enum MessageIntent {
+  SCHEDULE = "SCHEDULE",
+  UNKNOWN = "UNKNOWN",
+}
+
+export enum MessagePriority {
+  NORMAL = "NORMAL",
+  HIGH = "HIGH",
+  LOW = "LOW",
+}
+
+export enum MessageDirection {
+  INBOUND = "INBOUND",
+  OUTBOUND = "OUTBOUND",
+}
+
+export interface EvaluatedRule {
+  intent: MessageIntent;
+  matches: number;
+  score: number;
+  matchedPatterns: string[];
+}
+
+export interface AIClassification {
+  intent: MessageIntent;
+  priority: MessagePriority;
+  action: ConversationStatus;
+  score?: number;
+  matchedPatterns?: string[];
+  skippedRulesCount?: number;
+  evaluatedRules?: EvaluatedRule[];
+}
+
+
+
+
+
+============================================================
+FILE: api/src/modules/conversations/intent/intent.resolver.ts
+============================================================
+import { IntentLoader, CompiledIntentRule } from "./intent.loader";
+import {
+  AIClassification,
+  MessageIntent,
+  MessagePriority,
+  ConversationStatus,
+  EvaluatedRule,
+} from "../types";
+import { normalizeText, tokenizeNormalized } from "../utils/normalize";
+
+export class IntentResolver {
+  private cache = new Map<string, AIClassification>();
+  private readonly MAX_CACHE_SIZE = 500;
+
+  constructor(private readonly loader: IntentLoader) {}
+
+  resolve(message: string, debug = false, tenantId?: string): AIClassification {
+    const text = normalizeText(message);
+    if (!text) {
+      return this.fallback();
+    }
+
+    const key = tenantId ? `${text}-${tenantId}` : text;
+
+    if (!debug && this.cache.has(key)) {
+      const cachedResult = this.cache.get(key)!;
+      // LRU refresh
+      this.cache.delete(key);
+      this.cache.set(text, cachedResult);
+      return cachedResult;
+    }
+
+    const messageTokens = tokenizeNormalized(text);
+
+    let skippedRulesCount = 0;
+    const evaluatedRules: EvaluatedRule[] = [];
+
+    // --- PHASE 1: HIGH PRIORITY DETECTION ---
+    const highPriorityRules = this.loader.getHighPriorityRules();
+    for (const rule of highPriorityRules) {
+      if (!this.hasIntersection(messageTokens, rule.keywords)) {
+        skippedRulesCount++;
+        continue;
+      }
+
+      let matches = 0;
+      const matchedPatterns: string[] = [];
+
+      for (let i = 0; i < rule.regexes.length; i++) {
+        if (rule.regexes[i].test(text)) {
+          matches++;
+          matchedPatterns.push(rule.patterns[i]);
+        }
+      }
+
+      const score = rule.weight; // Constant score for High Priority
+
+      if (debug) {
+        evaluatedRules.push({
+          intent: rule.intent,
+          matches,
+          score,
+          matchedPatterns,
+        });
+      }
+
+      if (matches > 0) {
+        return this.returnResult(
+          text,
+          {
+            intent: rule.intent,
+            priority: rule.priority,
+            action: rule.action,
+            score,
+            matchedPatterns,
+            skippedRulesCount,
+            ...(debug && { evaluatedRules }),
+          },
+          debug,
+        );
+      }
+    }
+
+    // --- PHASE 2: SCORING (Non-HIGH priority) ---
+    const normalRules = this.loader.getNormalRules();
+    let bestRule: CompiledIntentRule | null = null;
+    let bestScore = -1;
+    let bestMatchedPatterns: string[] = [];
+
+    for (const rule of normalRules) {
+      if (!this.hasIntersection(messageTokens, rule.keywords)) {
+        skippedRulesCount++;
+        continue;
+      }
+
+      let matches = 0;
+      const matchedPatterns: string[] = [];
+
+      for (let i = 0; i < rule.regexes.length; i++) {
+        if (rule.regexes[i].test(text)) {
+          matches++;
+          matchedPatterns.push(rule.patterns[i]);
+        }
+      }
+
+      if (debug) {
+        evaluatedRules.push({
+          intent: rule.intent,
+          matches,
+          score: rule.weight + matches / rule.patternCount,
+          matchedPatterns,
+        });
+      }
+
+      if (matches > 0) {
+        const score = rule.weight + matches / rule.patternCount;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestRule = rule;
+          bestMatchedPatterns = matchedPatterns;
+        }
+      }
+    }
+
+    if (bestRule) {
+      return this.returnResult(
+        text,
+        {
+          intent: bestRule.intent,
+          priority: bestRule.priority,
+          action: bestRule.action,
+          score: bestScore,
+          matchedPatterns: bestMatchedPatterns,
+          skippedRulesCount,
+          ...(debug && { evaluatedRules }),
+        },
+        debug,
+      );
+    }
+
+    return this.returnResult(
+      text,
+      this.fallback(skippedRulesCount, debug ? evaluatedRules : undefined),
+      debug,
+    );
+  }
+
+  private hasIntersection(tokens: Set<string>, keywords: Set<string>): boolean {
+    if (keywords.size === 0) return false; // Rule matches nothing if empty
+    for (const token of tokens) {
+      if (keywords.has(token)) return true;
+    }
+    return false;
+  }
+
+  private fallback(
+    skippedRulesCount = 0,
+    evaluatedRules?: EvaluatedRule[],
+  ): AIClassification {
+    return {
+      intent: MessageIntent.UNKNOWN,
+      priority: MessagePriority.LOW,
+      action: ConversationStatus.AUTO,
+      score: 0,
+      matchedPatterns: [],
+      skippedRulesCount,
+      ...(evaluatedRules && { evaluatedRules }),
+    };
+  }
+
+  private returnResult(
+    key: string,
+    result: AIClassification,
+    debug: boolean,
+  ): AIClassification {
+    if (!debug) {
+      if (this.cache.size >= this.MAX_CACHE_SIZE) {
+        const firstKey = this.cache.keys().next().value;
+        if (firstKey !== undefined) this.cache.delete(firstKey);
+      }
+      this.cache.set(key, result);
+    }
+    return result;
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/intent/intent.config.ts
+============================================================
+import { MessageIntent, MessagePriority, ConversationStatus } from "../types";
+
+export interface IntentRule {
+  intent: MessageIntent;
+  priority: MessagePriority;
+  action: ConversationStatus;
+  weight: number;
+  patterns: string[];
+}
+
+// This file is the source of truth for intent classification.
+// No logic should be placed outside this file.
+
+export const INTENT_RULES: IntentRule[] = [
+  {
+    intent: MessageIntent.SCHEDULE,
+    priority: MessagePriority.NORMAL,
+    action: ConversationStatus.AUTO,
+    weight: 10,
+    patterns: [
+      "agendar",
+      "consulta",
+      "marcar",
+      "horario",
+      "disponivel",
+      "vago",
+      "vagas",
+      "agenda",
+      "abrir vaga",
+    ],
+  },
+  {
+    intent: MessageIntent.UNKNOWN,
+    priority: MessagePriority.HIGH,
+    action: ConversationStatus.HUMAN,
+    weight: 100,
+    patterns: [
+      "dor no peito",
+      "urgente",
+      "emergencia",
+      "socorro",
+      "ajuda",
+      "ajuda medica",
+    ],
+  },
+];
+
+
+
+
+
+============================================================
+FILE: api/src/modules/conversations/intent/intent.loader.ts
+============================================================
+import { INTENT_RULES, IntentRule } from "./intent.config";
+import { normalizeText, tokenizeNormalized } from "../utils/normalize";
+import { MessagePriority } from "../types";
+
+export interface CompiledIntentRule extends IntentRule {
+  regexes: RegExp[];
+  patternCount: number;
+  keywords: Set<string>;
+}
+
+export class IntentLoader {
+  private highPriorityRules: CompiledIntentRule[] = [];
+  private normalRules: CompiledIntentRule[] = [];
+
+  constructor() {
+    const compiled = this.normalize(INTENT_RULES);
+    this.validate(compiled);
+
+    for (const rule of compiled) {
+      if (rule.priority === MessagePriority.HIGH) {
+        this.highPriorityRules.push(rule);
+      } else {
+        this.normalRules.push(rule);
+      }
+    }
+  }
+
+  getHighPriorityRules(): CompiledIntentRule[] {
+    return this.highPriorityRules;
+  }
+
+  getNormalRules(): CompiledIntentRule[] {
+    return this.normalRules;
+  }
+
+  private normalize(rules: IntentRule[]): CompiledIntentRule[] {
+    return rules.map((rule) => {
+      const keywords = new Set<string>();
+      rule.patterns.forEach((p) => {
+        const normalized = normalizeText(p);
+        tokenizeNormalized(normalized).forEach((token: string) =>
+          keywords.add(token),
+        );
+      });
+
+      return {
+        ...rule,
+        regexes: rule.patterns.map((p) => this.toRegex(p)),
+        patternCount: Math.max(1, rule.patterns.length), // avoid division by zero
+        keywords,
+      };
+    });
+  }
+
+  private toRegex(pattern: string): RegExp {
+    const normalizedPattern = normalizeText(pattern);
+    const words = normalizedPattern.split(/\s+/);
+
+    // Create strategy: \bword\w*\b for each word
+    const regexParts = words.map((word) => `\\b${word}\\w*\\b`);
+    const regexStr = regexParts.join("\\s+");
+
+    return new RegExp(regexStr, "i"); // "i" is safe
+  }
+
+  private validate(rules: IntentRule[]) {
+    for (const rule of rules) {
+      if (!rule.patterns || rule.patterns.length === 0) {
+        throw new Error(`Intent ${rule.intent} must have at least one pattern`);
+      }
+    }
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/context/contextBuilder.ts
+============================================================
+import { MessageDirection } from "../types";
+
+export interface ContextMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ConversationContext {
+  messages: ContextMessage[];
+  lastUserMessage?: string;
+  lastAssistantMessage?: string;
+}
+
+export class ContextBuilder {
+  private readonly MAX_MESSAGES = 12;
+
+  build(
+    messages: {
+      content: string;
+      direction: MessageDirection;
+    }[],
+  ): ConversationContext {
+    if (!messages || messages.length === 0) {
+      return { messages: [] };
+    }
+
+    // garante ordem cronológica
+    const ordered = [...messages]
+      .sort((a, b) => (a as any).createdAt - (b as any).createdAt)
+      .slice(-this.MAX_MESSAGES);
+
+    const contextMessages: ContextMessage[] = ordered.map((msg) => ({
+      role: msg.direction === MessageDirection.INBOUND ? "user" : "assistant",
+      content: msg.content,
+    }));
+
+    const lastUser = [...contextMessages]
+      .reverse()
+      .find((m) => m.role === "user");
+
+    const lastAssistant = [...contextMessages]
+      .reverse()
+      .find((m) => m.role === "assistant");
+
+    return {
+      messages: contextMessages,
+      lastUserMessage: lastUser?.content,
+      lastAssistantMessage: lastAssistant?.content,
+    };
+  }
+}
+
+
+
+============================================================
+FILE: api/src/modules/conversations/utils/normalize.ts
+============================================================
+export function normalizeText(input: string): string {
+  if (!input) return "";
+  return input
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove accents
+    .toLowerCase()
+    .replace(/[^\w\s]/gi, "") // remove punctuation safely
+    .replace(/\s+/g, " ") // collapse multiple spaces
+    .trim();
+}
+
+export function tokenizeNormalized(normalizedText: string): Set<string> {
+  return new Set(normalizedText.split(" ").filter((w) => w.length >= 2));
+}
+
+
+
+============================================================
+FILE: api/src/modules/scheduling/service.ts
+============================================================
+import { logger } from "../../lib/logger";
+import { WhatsAppService } from "../whatsapp/service";
+import { IAppointmentRepository, ILogRepository } from "../../application/interfaces/repositories";
+
+export class SchedulingService {
+  constructor(
+    private whatsappService: WhatsAppService,
+    private appointmentRepo: IAppointmentRepository,
+    private logRepo: ILogRepository
+  ) {}
+
+  async sendDailyReminders() {
+    try {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setHours(0, 0, 0, 0);
+
+      const afterTomorrow = new Date(tomorrow);
+      afterTomorrow.setDate(tomorrow.getDate() + 1);
+
+      const appointments = await this.appointmentRepo.findForTomorrow();
+
+      for (const appt of appointments) {
+        const message = `Olá ${appt.patientName}, lembrete de sua consulta amanhã às ${appt.date.getHours()}:${appt.date.getMinutes().toString().padStart(2, "0")}.`;
+        try {
+          const phone = appt.phone;
+          await this.whatsappService.sendMessage({ type: "text", to: phone, text: message });
+        } catch (error) {
+          logger.error({
+            msg: "reminder_send_failed",
+            appointmentId: appt.id,
+            error,
+          });
+        }
+      }
+    } catch (error) {
+      logger.error({ msg: "daily_reminders_error", error });
+    }
+  }
+
+  // Service methods
+  async createAppointment(
+    tenantId: string,
+    patientName: string,
+    phone: string,
+    date: Date,
+  ) {
+    const conflict = await this.checkConflict(tenantId, date);
+    if (conflict) {
+      throw new Error("Horário indisponível");
+    }
+
+    return this.appointmentRepo.create({
+      tenantId,
+      patientName,
+      phone,
+      date,
+    });
+  }
+
+  async checkConflict(tenantId: string, date: Date): Promise<boolean> {
+    // Check if there is an appointment within 30 mins window (mock rule)
+    const start = new Date(date);
+    const end = new Date(date.getTime() + 30 * 60000);
+
+    const count = await this.appointmentRepo.countConflicts(tenantId, start, end);
+
+    return count > 0;
+  }
+
+  async getAppointmentsForTomorrow(tenantId: string) {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+
+    const afterTomorrow = new Date(tomorrow);
+    afterTomorrow.setDate(tomorrow.getDate() + 1);
+
+    return this.appointmentRepo.findForTomorrow(tenantId);
+  }
+}
+
+
+
+============================================================
+FILE: web/eslint.config.js
+============================================================
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import tseslint from 'typescript-eslint'
+import { defineConfig, globalIgnores } from 'eslint/config'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      js.configs.recommended,
+      tseslint.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+    },
+  },
+])
+
+
+
+============================================================
+FILE: web/components.json
+============================================================
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "base-nova",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "tailwind.config.ts",
+    "css": "src/index.css",
+    "baseColor": "neutral",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "iconLibrary": "lucide",
+  "rtl": false,
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
+  },
+  "menuColor": "default",
+  "menuAccent": "subtle",
+  "registries": {}
+}
+
+
+
+============================================================
+FILE: web/tailwind.config.ts
+============================================================
+export default {
+  content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+};
+
+
+
+============================================================
+FILE: web/tsconfig.node.json
+============================================================
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "module": "esnext",
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["vite.config.ts"]
+}
+
+
+
+============================================================
+FILE: web/tsconfig.app.json
+============================================================
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    "types": ["vite/client"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
+}
+
+
+
+============================================================
+FILE: web/index.html
+============================================================
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>web</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
+
+
+============================================================
+FILE: web/postcss.config.ts
+============================================================
+export default {
+  plugins: {
+    "@tailwindcss/postcss": {},
+    autoprefixer: {},
+  },
+};
+
+
+
+============================================================
+FILE: web/.gitignore
+============================================================
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+
+
+============================================================
+FILE: web/package.json
+============================================================
+{
+  "name": "web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.4.0",
+    "@fontsource-variable/geist": "^5.2.8",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.8.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "shadcn": "^4.3.0",
+    "tailwind-merge": "^3.5.0",
+    "tw-animate-css": "^1.4.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@tailwindcss/postcss": "^4.2.4",
+    "@types/node": "^24.12.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "autoprefixer": "^10.5.0",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.4.0",
+    "jiti": "^2.6.1",
+    "postcss": "^8.5.10",
+    "tailwindcss": "^4.2.2",
+    "tsx": "^4.21.0",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.58.0",
+    "vite": "^8.0.4"
+  }
+}
+
+
+
+============================================================
+FILE: web/tsconfig.json
+============================================================
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./tsconfig.app.json"
+    },
+    {
+      "path": "./tsconfig.node.json"
+    }
+  ],
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}
+
+
+
+============================================================
+FILE: web/README.md
+============================================================
+# React + TypeScript + Vite
+
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+
+Currently, two official plugins are available:
+
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the ESLint configuration
+
+If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+
+```js
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+
+      // Remove tseslint.configs.recommended and replace with this
+      tseslint.configs.recommendedTypeChecked,
+      // Alternatively, use this for stricter rules
+      tseslint.configs.strictTypeChecked,
+      // Optionally, add this for stylistic rules
+      tseslint.configs.stylisticTypeChecked,
+
+      // Other configs...
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+```
+
+You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+
+```js
+// eslint.config.js
+import reactX from 'eslint-plugin-react-x'
+import reactDom from 'eslint-plugin-react-dom'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+      // Enable lint rules for React
+      reactX.configs['recommended-typescript'],
+      // Enable lint rules for React DOM
+      reactDom.configs.recommended,
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+```
+
+
+
+============================================================
+FILE: web/vite.config.ts
+============================================================
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import path from "path";
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+  },
+});
+
+
+
+============================================================
+FILE: web/src/App.tsx
+============================================================
+import InboxPage from "./pages/InboxPage";
+
+function App() {
+  return <InboxPage />;
+}
+
+export default App;
+
+
+
+============================================================
+FILE: web/src/main.tsx
+============================================================
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.tsx'
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+
+
+
+============================================================
+FILE: web/src/index.css
+============================================================
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Geist Variable', sans-serif;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.145 0 0);
+    --primary: oklch(0.205 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.97 0 0);
+    --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: oklch(0.97 0 0);
+    --accent-foreground: oklch(0.205 0 0);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.708 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --radius: 0.625rem;
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar-primary: oklch(0.205 0 0);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent-foreground: oklch(0.205 0 0);
+    --sidebar-border: oklch(0.922 0 0);
+    --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+}
+
+
+============================================================
+FILE: web/src/App.css
+============================================================
+.counter {
+  font-size: 16px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 2px solid transparent;
+  transition: border-color 0.3s;
+  margin-bottom: 24px;
+
+  &:hover {
+    border-color: var(--accent-border);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+.hero {
+  position: relative;
+
+  .base,
+  .framework,
+  .vite {
+    inset-inline: 0;
+    margin: 0 auto;
+  }
+
+  .base {
+    width: 170px;
+    position: relative;
+    z-index: 0;
+  }
+
+  .framework,
+  .vite {
+    position: absolute;
+  }
+
+  .framework {
+    z-index: 1;
+    top: 34px;
+    height: 28px;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
+      scale(1.4);
+  }
+
+  .vite {
+    z-index: 0;
+    top: 107px;
+    height: 26px;
+    width: auto;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
+      scale(0.8);
+  }
+}
+
+#center {
+  display: flex;
+  flex-direction: column;
+  gap: 25px;
+  place-content: center;
+  place-items: center;
+  flex-grow: 1;
+
+  @media (max-width: 1024px) {
+    padding: 32px 20px 24px;
+    gap: 18px;
+  }
+}
+
+#next-steps {
+  display: flex;
+  border-top: 1px solid var(--border);
+  text-align: left;
+
+  & > div {
+    flex: 1 1 0;
+    padding: 32px;
+    @media (max-width: 1024px) {
+      padding: 24px 20px;
+    }
+  }
+
+  .icon {
+    margin-bottom: 16px;
+    width: 22px;
+    height: 22px;
+  }
+
+  @media (max-width: 1024px) {
+    flex-direction: column;
+    text-align: center;
+  }
+}
+
+#docs {
+  border-right: 1px solid var(--border);
+
+  @media (max-width: 1024px) {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+#next-steps ul {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  gap: 8px;
+  margin: 32px 0 0;
+
+  .logo {
+    height: 18px;
+  }
+
+  a {
+    color: var(--text-h);
+    font-size: 16px;
+    border-radius: 6px;
+    background: var(--social-bg);
+    display: flex;
+    padding: 6px 12px;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+    transition: box-shadow 0.3s;
+
+    &:hover {
+      box-shadow: var(--shadow);
+    }
+    .button-icon {
+      height: 18px;
+      width: 18px;
+    }
+  }
+
+  @media (max-width: 1024px) {
+    margin-top: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
+
+    li {
+      flex: 1 1 calc(50% - 8px);
+    }
+
+    a {
+      width: 100%;
+      justify-content: center;
+      box-sizing: border-box;
+    }
+  }
+}
+
+#spacer {
+  height: 88px;
+  border-top: 1px solid var(--border);
+  @media (max-width: 1024px) {
+    height: 48px;
+  }
+}
+
+.ticks {
+  position: relative;
+  width: 100%;
+
+  &::before,
+  &::after {
+    content: '';
+    position: absolute;
+    top: -4.5px;
+    border: 5px solid transparent;
+  }
+
+  &::before {
+    left: 0;
+    border-left-color: var(--border);
+  }
+  &::after {
+    right: 0;
+    border-right-color: var(--border);
+  }
+}
+
+
+
+============================================================
+FILE: web/src/features/inbox/components/ChatWindow.tsx
+============================================================
+import { MessageInput } from "./MessageInput";
+
+export function ChatWindow() {
+  const messages = [
+    { id: "1", content: "Oi", direction: "INBOUND" },
+    { id: "2", content: "Olá! Como posso ajudar?", direction: "OUTBOUND" },
+  ];
+
+  return (
+    <div className="h-full flex flex-col">
+      <div className="flex-1 p-4 overflow-y-auto">
+        {messages.map((m) => (
+          <div
+            key={m.id}
+            className={`mb-2 flex ${
+              m.direction === "OUTBOUND" ? "justify-end" : "justify-start"
+            }`}
+          >
+            <div className="bg-gray-200 px-3 py-2 rounded-lg max-w-xs">
+              {m.content}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="p-4 border-t">
+        <MessageInput />
+      </div>
+    </div>
+  );
+}
+
+
+
+============================================================
+FILE: web/src/features/inbox/components/MessageInput.tsx
+============================================================
+import { useState } from "react";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+
+export function MessageInput() {
+  const [text, setText] = useState("");
+
+  function handleSend() {
+    console.log("send:", text);
+    setText("");
+  }
+
+  return (
+    <div className="flex gap-2">
+      <Input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="Digite uma mensagem..."
+      />
+      <Button onClick={handleSend}>Enviar</Button>
+    </div>
+  );
+}
+
+
+
+============================================================
+FILE: web/src/features/inbox/components/ConversationList.tsx
+============================================================
+export function ConversationList() {
+  const conversations = [
+    { id: "1", phone: "551999999999", last: "Oi, quero agendar" },
+    { id: "2", phone: "551888888888", last: "Tem horário?" },
+  ];
+
+  return (
+    <div className="h-full overflow-y-auto">
+      {conversations.map((c) => (
+        <div
+          key={c.id}
+          className="p-4 border-b hover:bg-gray-100 cursor-pointer"
+        >
+          <div className="font-medium">{c.phone}</div>
+          <div className="text-sm text-gray-500">{c.last}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+
+============================================================
+FILE: web/src/lib/utils.ts
+============================================================
+import { clsx, type ClassValue } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+
+
+============================================================
+FILE: web/src/components/ui/input.tsx
+============================================================
+import * as React from "react"
+import { Input as InputPrimitive } from "@base-ui/react/input"
+
+import { cn } from "@/lib/utils"
+
+function Input({ className, type, ...props }: React.ComponentProps<"input">) {
+  return (
+    <InputPrimitive
+      type={type}
+      data-slot="input"
+      className={cn(
+        "h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-base transition-colors outline-none file:inline-flex file:h-6 file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:bg-input/50 disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 md:text-sm dark:bg-input/30 dark:disabled:bg-input/80 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+export { Input }
+
+
+
+============================================================
+FILE: web/src/components/ui/button.tsx
+============================================================
+import { Button as ButtonPrimitive } from "@base-ui/react/button"
+import { cva, type VariantProps } from "class-variance-authority"
+
+import { cn } from "@/lib/utils"
+
+const buttonVariants = cva(
+  "group/button inline-flex shrink-0 items-center justify-center rounded-lg border border-transparent bg-clip-padding text-sm font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  {
+    variants: {
+      variant: {
+        default: "bg-primary text-primary-foreground [a]:hover:bg-primary/80",
+        outline:
+          "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
+        secondary:
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80 aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
+        ghost:
+          "hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50",
+        destructive:
+          "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
+        link: "text-primary underline-offset-4 hover:underline",
+      },
+      size: {
+        default:
+          "h-8 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
+        xs: "h-6 gap-1 rounded-[min(var(--radius-md),10px)] px-2 text-xs in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3",
+        sm: "h-7 gap-1 rounded-[min(var(--radius-md),12px)] px-2.5 text-[0.8rem] in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3.5",
+        lg: "h-9 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
+        icon: "size-8",
+        "icon-xs":
+          "size-6 rounded-[min(var(--radius-md),10px)] in-data-[slot=button-group]:rounded-lg [&_svg:not([class*='size-'])]:size-3",
+        "icon-sm":
+          "size-7 rounded-[min(var(--radius-md),12px)] in-data-[slot=button-group]:rounded-lg",
+        "icon-lg": "size-9",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+)
+
+function Button({
+  className,
+  variant = "default",
+  size = "default",
+  ...props
+}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
+  return (
+    <ButtonPrimitive
+      data-slot="button"
+      className={cn(buttonVariants({ variant, size, className }))}
+      {...props}
+    />
+  )
+}
+
+export { Button, buttonVariants }
+
+
+
+============================================================
+FILE: web/src/pages/InboxPage.tsx
+============================================================
+import { ConversationList } from "@/features/inbox/components/ConversationList";
+import { ChatWindow } from "@/features/inbox/components/ChatWindow";
+
+export default function InboxPage() {
+  return (
+    <div className="h-screen flex">
+      <div className="w-80 border-r">
+        <ConversationList />
+      </div>
+      <div className="flex-1">
+        <ChatWindow />
+      </div>
+    </div>
+  );
+}
+
+

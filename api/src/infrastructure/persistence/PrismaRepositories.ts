@@ -4,7 +4,8 @@ import {
   IMessageRepository,
   ITenantRepository,
   IAppointmentRepository,
-  ILogRepository
+  ILogRepository,
+  ConversationWithLastMessage
 } from "../../application/interfaces/repositories";
 
 export class PrismaConversationRepository implements IConversationRepository {
@@ -14,6 +15,32 @@ export class PrismaConversationRepository implements IConversationRepository {
     return this.prisma.conversation.findFirst({
       where: { tenantId, phone },
     });
+  }
+
+  async findById(id: string): Promise<Conversation | null> {
+    return this.prisma.conversation.findUnique({
+      where: { id },
+    });
+  }
+
+  async findAllByTenant(tenantId: string): Promise<ConversationWithLastMessage[]> {
+    const conversations = await this.prisma.conversation.findMany({
+      where: { tenantId },
+      orderBy: { updatedAt: "desc" },
+      include: {
+        messages: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { content: true },
+        },
+      },
+    });
+
+    return conversations.map((conv) => ({
+      ...conv,
+      messages: undefined as any,
+      lastMessage: conv.messages[0]?.content ?? null,
+    }));
   }
 
   async create(data: { tenantId: string; phone: string; status: any }): Promise<Conversation> {
@@ -49,6 +76,13 @@ export class PrismaMessageRepository implements IMessageRepository {
   async findByOutboundId(outboundId: string): Promise<Message | null> {
     return this.prisma.message.findUnique({
       where: { outboundId },
+    });
+  }
+
+  async findByConversation(conversationId: string): Promise<Message[]> {
+    return this.prisma.message.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: "asc" },
     });
   }
 

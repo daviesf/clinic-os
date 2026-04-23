@@ -1,8 +1,13 @@
+import { IResponseTemplateService } from "../responseTemplates/IResponseTemplateService";
+
+export interface IntentHandlerContext {
+  tenantId: string;
+  phone: string;
+  content: string;
+  intent: string;
+  templateService: IResponseTemplateService;
+}
+
 export interface IIntentHandler {
-  handle(context: {
-    tenantId: string;
-    phone: string;
-    content: string;
-    intent: string;
-  }): Promise<string>;
+  handle(context: IntentHandlerContext): Promise<string>;
 }

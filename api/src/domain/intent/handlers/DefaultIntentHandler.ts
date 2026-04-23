@@ -1,7 +1,13 @@
-import { IIntentHandler } from "../IIntentHandler";
+import { IIntentHandler, IntentHandlerContext } from "../IIntentHandler";
+import { MessageIntent } from "../../../modules/conversations/types";
 
 export class DefaultIntentHandler implements IIntentHandler {
-  async handle(context: { tenantId: string; phone: string; content: string; intent: string }): Promise<string> {
-    return "Olá! Sou o assistente virtual. Como posso ajudar?";
+  async handle(context: IntentHandlerContext): Promise<string> {
+    return context.templateService.getTemplate(MessageIntent.UNKNOWN, {
+      tenantId: context.tenantId,
+      phone: context.phone,
+      content: context.content,
+      intent: context.intent,
+    });
   }
 }

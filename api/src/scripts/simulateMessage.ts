@@ -7,6 +7,8 @@ import { ResponseService } from "../modules/conversations/ResponseService";
 import { PrismaConversationRepository, PrismaMessageRepository } from "../infrastructure/persistence/PrismaRepositories";
 import { RedisRateLimiter } from "../infrastructure/redis/RedisRateLimiter";
 import { ConversationStateService } from "../domain/conversation/ConversationStateService";
+import { IntentHandlerRegistry } from "../domain/intent/IntentHandlerRegistry";
+import { ConfigResponseTemplateService } from "../modules/conversations/ConfigResponseTemplateService";
 import { ConversationStatus } from "../modules/conversations/types";
 import { logger } from "../lib/logger";
 import { prisma } from "../lib/prisma";
@@ -53,7 +55,7 @@ async function simulate() {
   const messageService = new MessageService(messageRepo);
   const intentService = new IntentService();
   const flowService = new ConversationFlowService(stateService);
-  const responseService = new ResponseService();
+  const responseService = new ResponseService(new IntentHandlerRegistry(), new ConfigResponseTemplateService());
 
   console.log(`\n📩 Incoming: ${messageText}`);
 

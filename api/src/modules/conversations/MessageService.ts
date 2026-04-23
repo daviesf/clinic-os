@@ -1,5 +1,5 @@
 import { IMessageRepository } from "../../application/interfaces/repositories";
-import { MessageDirection } from "./types";
+import { MessageDirection, MessageStatus } from "./types";
 import { outboundMessageQueue } from "../../application/queues/messageQueue";
 
 export class MessageService {
@@ -31,7 +31,7 @@ export class MessageService {
         direction: MessageDirection.OUTBOUND,
         content,
         outboundId,
-        status: "PENDING"
+        status: MessageStatus.PENDING
       });
 
       // Point 10: Enqueue after saving
@@ -43,3 +43,4 @@ export class MessageService {
     }
   }
 }
+

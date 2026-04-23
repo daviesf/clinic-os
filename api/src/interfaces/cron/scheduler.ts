@@ -1,29 +1,51 @@
 import cron from "node-cron";
 import { SchedulingService } from "../../modules/scheduling/service";
-import { PrismaLogRepository } from "../../infrastructure/persistence/PrismaRepositories";
-import { prisma } from "../../lib/prisma";
+import { ILogRepository } from "../../application/interfaces/repositories";
+import { RedisLock } from "../../infrastructure/redis/RedisLock";
 import { logger } from "../../lib/logger";
+
+const LOCK_TTL_SECONDS = 60;
 
 export function startCronJobs(
   schedulingService: SchedulingService,
-  logRepo: PrismaLogRepository
+  logRepo: ILogRepository
 ) {
+  const lock = new RedisLock();
+
   // Todo dia 08:00
   cron.schedule("0 8 * * *", async () => {
-    logger.info({ msg: "running_daily_reminders" });
-    await schedulingService.sendDailyReminders();
+    const acquired = await lock.acquire("cron:daily_reminders", LOCK_TTL_SECONDS);
+    if (!acquired) {
+      logger.info({ event: "cron.daily_reminders.skipped", reason: "lock_not_acquired" });
+      return;
+    }
+
+    try {
+      logger.info({ event: "cron.daily_reminders.start" });
+      await schedulingService.sendDailyReminders();
+    } finally {
+      await lock.release("cron:daily_reminders");
+    }
   });
 
   // Todo dia 03:00 (Log cleanup)
   cron.schedule("0 3 * * *", async () => {
-    logger.info({ msg: "running_log_cleanup" });
+    const acquired = await lock.acquire("cron:log_cleanup", LOCK_TTL_SECONDS);
+    if (!acquired) {
+      logger.info({ event: "cron.log_cleanup.skipped", reason: "lock_not_acquired" });
+      return;
+    }
+
     try {
+      logger.info({ event: "cron.log_cleanup.start" });
       const threshold = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000); // 14 days
       await logRepo.deleteOlderThan(threshold);
     } catch (error) {
-      logger.error({ msg: "log_cleanup_failed", error });
+      logger.error({ event: "cron.log_cleanup.error", error });
+    } finally {
+      await lock.release("cron:log_cleanup");
     }
   });
 
-  logger.info({ msg: "cron_jobs_started" });
+  logger.info({ event: "cron.jobs_started" });
 }
