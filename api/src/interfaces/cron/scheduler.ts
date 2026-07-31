@@ -3,12 +3,16 @@ import { SchedulingService } from "../../modules/scheduling/service";
 import { ILogRepository } from "../../application/interfaces/repositories";
 import { RedisLock } from "../../infrastructure/redis/RedisLock";
 import { logger } from "../../lib/logger";
+import { ConsolidationWorker } from "../../application/workers/consolidationWorker";
+import { FollowUpWorker } from "../../application/workers/followUpWorker";
+import { ILLMProvider } from "../llm/ILLMProvider";
 
 const LOCK_TTL_SECONDS = 60;
 
 export function startCronJobs(
   schedulingService: SchedulingService,
-  logRepo: ILogRepository
+  logRepo: ILogRepository,
+  llmProvider?: ILLMProvider
 ) {
   const lock = new RedisLock();
 
@@ -46,6 +50,34 @@ export function startCronJobs(
       await lock.release("cron:log_cleanup");
     }
   });
+
+  // A cada hora (Consolidação de memória)
+  if (llmProvider) {
+    cron.schedule("0 * * * *", async () => {
+      const acquired = await lock.acquire("cron:consolidation", LOCK_TTL_SECONDS);
+      if (!acquired) return;
+
+      try {
+        const worker = new ConsolidationWorker(llmProvider);
+        await worker.run(2); // 2 horas de inatividade
+      } finally {
+        await lock.release("cron:consolidation");
+      }
+    });
+
+    // A cada 10 minutos (Follow-ups automáticos)
+    cron.schedule("*/10 * * * *", async () => {
+      const acquired = await lock.acquire("cron:follow_ups", LOCK_TTL_SECONDS);
+      if (!acquired) return;
+
+      try {
+        const worker = new FollowUpWorker(llmProvider);
+        await worker.run();
+      } finally {
+        await lock.release("cron:follow_ups");
+      }
+    });
+  }
 
   logger.info({ event: "cron.jobs_started" });
 }

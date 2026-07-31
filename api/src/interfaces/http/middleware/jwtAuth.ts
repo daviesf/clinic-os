@@ -42,7 +42,16 @@ export function jwtAuth(req: Request, res: Response, next: NextFunction): void {
     };
 
     (req as Request & { auth: AuthContext }).auth = auth;
-    next();
+    
+    // Inject tenantId into AsyncLocalStorage for Prisma RLS
+    import("../../../lib/requestContext").then(({ asyncLocalStorage }) => {
+      asyncLocalStorage.run({ requestId: req.headers["x-request-id"] as string || crypto.randomUUID(), tenantId: decoded.tenantId }, () => {
+        next();
+      });
+    }).catch(err => {
+      logger.error({ event: "auth.als_setup_failed", error: err });
+      next(err);
+    });
   } catch (error) {
     logger.warn({ event: "auth.invalid_token", path: req.path, error });
     res.status(401).json({ error: "Invalid or expired token" });

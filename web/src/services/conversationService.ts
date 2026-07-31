@@ -23,3 +23,11 @@ export async function sendMessage(
   );
   return response.data.data;
 }
+
+export async function takeOverConversation(conversationId: string): Promise<void> {
+  await api.post(`/api/conversations/${conversationId}/take-over`);
+}
+
+export async function releaseConversation(conversationId: string): Promise<void> {
+  await api.post(`/api/conversations/${conversationId}/release`);
+}

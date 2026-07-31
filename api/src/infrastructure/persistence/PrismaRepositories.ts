@@ -1,12 +1,65 @@
-import { PrismaClient, Conversation, Message, Tenant, Appointment, Log, Prisma } from "@prisma/client";
+import { PrismaClient, Conversation, Message, Tenant, Appointment, Log, Patient, Prisma } from "@prisma/client";
+import { encrypt, decrypt } from "../../lib/encryption";
 import {
   IConversationRepository,
   IMessageRepository,
   ITenantRepository,
   IAppointmentRepository,
   ILogRepository,
+  IPatientRepository,
   ConversationWithLastMessage
 } from "../../application/interfaces/repositories";
+
+export class PrismaPatientRepository implements IPatientRepository {
+  constructor(private readonly prisma: PrismaClient) {}
+
+  async findById(tenantId: string, id: string): Promise<Patient | null> {
+    return this.prisma.patient.findFirst({
+      where: { id, tenantId }
+    });
+  }
+
+  async findAll(tenantId: string, params: { search?: string; skip?: number; take?: number }): Promise<{ data: Patient[]; total: number }> {
+    const where: Prisma.PatientWhereInput = {
+      tenantId,
+      ...(params.search ? {
+        OR: [
+          { name: { contains: params.search, mode: "insensitive" as const } },
+          { phone: { contains: params.search } }
+        ]
+      } : {})
+    };
+
+    const [data, total] = await Promise.all([
+      this.prisma.patient.findMany({
+        where,
+        skip: params.skip,
+        take: params.take,
+        orderBy: { createdAt: "desc" }
+      }),
+      this.prisma.patient.count({ where })
+    ]);
+
+    return { data, total };
+  }
+
+  async create(data: Omit<Prisma.PatientUncheckedCreateInput, "id" | "createdAt">): Promise<Patient> {
+    return this.prisma.patient.create({ data });
+  }
+
+  async update(tenantId: string, id: string, data: Partial<Patient>): Promise<Patient> {
+    return this.prisma.patient.update({
+      where: { id },
+      data
+    });
+  }
+
+  async delete(tenantId: string, id: string): Promise<void> {
+    await this.prisma.patient.delete({
+      where: { id }
+    });
+  }
+}
 
 export class PrismaConversationRepository implements IConversationRepository {
   constructor(private readonly prisma: PrismaClient) {}
@@ -28,6 +81,7 @@ export class PrismaConversationRepository implements IConversationRepository {
       where: { tenantId },
       orderBy: { updatedAt: "desc" },
       include: {
+        patient: true,
         messages: {
           orderBy: { createdAt: "desc" },
           take: 1,
@@ -39,7 +93,7 @@ export class PrismaConversationRepository implements IConversationRepository {
     return conversations.map((conv) => ({
       ...conv,
       messages: undefined as any,
-      lastMessage: conv.messages[0]?.content ?? null,
+      lastMessage: conv.messages[0] ? decrypt(conv.messages[0].content) : null,
     }));
   }
 
@@ -68,29 +122,35 @@ export class PrismaMessageRepository implements IMessageRepository {
     outboundId?: string | null;
     status?: string;
   }): Promise<Message> {
-    return this.prisma.message.create({
-      data,
+    const encryptedData = { ...data, content: encrypt(data.content) };
+    const msg = await this.prisma.message.create({
+      data: encryptedData,
     });
+    return { ...msg, content: decrypt(msg.content) };
   }
 
   async findByOutboundId(outboundId: string): Promise<Message | null> {
-    return this.prisma.message.findUnique({
+    const msg = await this.prisma.message.findUnique({
       where: { outboundId },
     });
+    if (msg) msg.content = decrypt(msg.content);
+    return msg;
   }
 
   async findByConversation(conversationId: string): Promise<Message[]> {
-    return this.prisma.message.findMany({
+    const msgs = await this.prisma.message.findMany({
       where: { conversationId },
       orderBy: { createdAt: "asc" },
     });
+    return msgs.map(m => ({ ...m, content: decrypt(m.content) }));
   }
 
   async updateStatus(id: string, status: string): Promise<Message> {
-    return this.prisma.message.update({
+    const msg = await this.prisma.message.update({
       where: { id },
       data: { status },
     });
+    return { ...msg, content: decrypt(msg.content) };
   }
 }
 
@@ -137,6 +197,16 @@ export class PrismaAppointmentRepository implements IAppointmentRepository {
 
   async create(data: { tenantId: string; patientName: string; phone: string; date: Date }): Promise<Appointment> {
     return this.prisma.appointment.create({ data });
+  }
+
+  async countByPhone(tenantId: string, phone: string, since: Date): Promise<number> {
+    return this.prisma.appointment.count({
+      where: {
+        tenantId,
+        phone,
+        createdAt: { gte: since }
+      }
+    });
   }
 }
 

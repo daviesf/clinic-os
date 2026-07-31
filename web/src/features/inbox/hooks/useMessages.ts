@@ -6,6 +6,5 @@ export function useMessages(conversationId: string | null) {
     queryKey: ["messages", conversationId],
     queryFn: () => getMessages(conversationId!),
     enabled: !!conversationId,
-    refetchInterval: 5_000,
   });
 }

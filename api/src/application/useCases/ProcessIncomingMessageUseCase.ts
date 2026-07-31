@@ -9,6 +9,7 @@ import { ConversationFlowService } from "../../modules/conversations/Conversatio
 import { ResponseService } from "../../modules/conversations/ResponseService";
 import { IRateLimiter } from "../interfaces/IRateLimiter";
 import { ConversationStatus } from "../../modules/conversations/types";
+import { AIOrchestrator } from "../../modules/ai/AIOrchestrator";
 
 export class ProcessIncomingMessageUseCase {
   constructor(
@@ -18,7 +19,8 @@ export class ProcessIncomingMessageUseCase {
     private messageService: MessageService,
     private intentService: IntentService,
     private flowService: ConversationFlowService,
-    private responseService: ResponseService
+    private responseService: ResponseService,
+    private aiOrchestrator?: AIOrchestrator
   ) {}
 
   async execute(value: any) {
@@ -27,13 +29,14 @@ export class ProcessIncomingMessageUseCase {
     const message = value.messages[0];
     const requestId = value.requestId || "req-" + Date.now();
 
-    if (!message?.text?.body || !message?.from) {
+    if (!message || (!message.text?.body && !message.audio?.id) || !message.from) {
       logger.warn({
         event: "message.invalid_payload",
         requestId,
         payload: {
-          hasText: !!message.text?.body,
-          from: message.from,
+          hasText: !!message?.text?.body,
+          hasAudio: !!message?.audio?.id,
+          from: message?.from,
         },
       });
       return;
@@ -41,7 +44,14 @@ export class ProcessIncomingMessageUseCase {
 
     const messageId: string = message.id;
     const phone: string = message.from;
-    const text: string = message.text.body;
+    let text: string = "";
+
+    if (message.type === "audio" && message.audio?.id) {
+      const { AudioTranscriptionProvider } = await import("../../infrastructure/llm/AudioTranscriptionProvider");
+      text = await AudioTranscriptionProvider.transcribe(message.audio.id);
+    } else {
+      text = message.text?.body || "";
+    }
     const phoneNumberId = value.metadata?.phone_number_id;
 
     if (!phoneNumberId) {
@@ -53,6 +63,13 @@ export class ProcessIncomingMessageUseCase {
 
     if (!tenant) {
       logger.warn({ event: "tenant_not_found", phoneNumberId });
+      return;
+    }
+
+    if (tenant.subscriptionStatus === "past_due" || tenant.subscriptionStatus === "canceled") {
+      logger.warn({ event: "tenant_subscription_blocked", tenantId: tenant.id, status: tenant.subscriptionStatus });
+      // Depending on the product definition, we could send a default "temporarily unavailable" message
+      // or simply ignore. We'll ignore to avoid AI billing costs.
       return;
     }
 
@@ -117,7 +134,13 @@ export class ProcessIncomingMessageUseCase {
            return;
         }
 
-        const responseText = await this.responseService.generate(classification.intent, tenantId, phone, text);
+        // Generate response — prefer AI orchestrator, fallback to rule-based
+        let responseText: string;
+        if (this.aiOrchestrator) {
+          responseText = await this.aiOrchestrator.generateResponse(conversation.id, tenantId, text, phone, conversation.patientId || undefined);
+        } else {
+          responseText = await this.responseService.generate(classification.intent, tenantId, phone, text);
+        }
 
         logger.info({
           event: "message.response",

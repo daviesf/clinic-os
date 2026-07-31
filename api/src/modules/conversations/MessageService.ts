@@ -1,18 +1,26 @@
 import { IMessageRepository } from "../../application/interfaces/repositories";
 import { MessageDirection, MessageStatus } from "./types";
 import { outboundMessageQueue } from "../../application/queues/messageQueue";
+import { emitToTenant } from "../../infrastructure/socket/emitter";
+import { getContext } from "../../lib/requestContext";
 
 export class MessageService {
   constructor(private messageRepo: IMessageRepository) {}
 
   async saveInbound(conversationId: string, content: string, externalId: string): Promise<boolean> {
     try {
-      await this.messageRepo.create({
+      const msg = await this.messageRepo.create({
         conversationId,
         direction: MessageDirection.INBOUND,
         content,
         externalId: externalId || null,
       });
+
+      const tenantId = getContext()?.tenantId;
+      if (tenantId) {
+        emitToTenant(tenantId, "new_message", msg);
+      }
+
       return true;
     } catch (error: any) {
       if (error.code === "P2002") {
@@ -33,6 +41,11 @@ export class MessageService {
         outboundId,
         status: MessageStatus.PENDING
       });
+
+      const tenantId = getContext()?.tenantId;
+      if (tenantId) {
+        emitToTenant(tenantId, "new_message", msg);
+      }
 
       // Point 10: Enqueue after saving
       await outboundMessageQueue.add("send-message", {

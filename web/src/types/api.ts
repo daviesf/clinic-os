@@ -3,6 +3,12 @@ export interface ConversationDTO {
   phone: string;
   status: string;
   lastMessage: string | null;
+  patientId: string | null;
+  patient?: {
+    id: string;
+    name: string | null;
+    phone: string;
+  } | null;
   updatedAt: string;
 }
 

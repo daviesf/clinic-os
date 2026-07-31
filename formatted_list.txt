@@ -1,0 +1,97 @@
+1. Arquivos Criados
+- .antigravitycli/1f492bf9-cd2e-4e27-b8a5-c72836a1f3c2.json (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- agy_outputs/diagnostic_report.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- agy_outputs/execution_backlog.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- agy_outputs/final_execution_backlog.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- agy_outputs/master_architecture_roadmap.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- agy_outputs/status_report_v1.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- agy_outputs/technical_architecture_blueprint.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/jest.config.js (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260529203901_init/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260529203915_enable_rls/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260530140423_init_pgvector/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260530140441_rls_semantic_memory/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260530140742_episodic_memory/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260530140751_rls_episodic_memory/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260530140945_audit_log/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260530140954_rls_audit_log/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260530141722_follow_ups/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260530141732_rls_follow_ups/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/prisma/migrations/20260620200000_hnsw_indexes/migration.sql (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/application/interfaces/IBillingProvider.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/application/services/AuditService.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/application/services/PatientService.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/application/useCases/AuthUseCase.spec.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/application/useCases/AuthUseCase.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/application/workers/consolidationWorker.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/application/workers/followUpWorker.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/infrastructure/billing/StripeBillingProvider.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/infrastructure/llm/AudioTranscriptionProvider.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/infrastructure/llm/OpenAIProvider.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/infrastructure/socket/SocketServer.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/infrastructure/socket/emitter.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/controllers/AnalyticsController.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/controllers/AppointmentController.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/controllers/AuthController.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/controllers/PatientController.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/controllers/TenantController.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/middleware/clinic-os.code-workspace (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/middleware/jwtAuth.spec.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/middleware/rateLimiterMiddleware.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/routes/analyticsRoutes.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/routes/appointmentRoutes.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/routes/authRoutes.e2e.spec.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/routes/authRoutes.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/routes/patientRoutes.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/http/routes/tenantRoutes.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/interfaces/llm/ILLMProvider.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/lib/encryption.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/modules/ai/AIOrchestrator.spec.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/modules/ai/AIOrchestrator.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/modules/ai/tools.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- api/src/modules/memory/SemanticMemoryService.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- docs/FINAL_READINESS_REPORT.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- docs/FULL_AUDIT_REPORT.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- docs/NEXT_MAJOR_EVOLUTION.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- docs/PROJECT_STATUS.md (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- req.py (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- web/src/hooks/useSocket.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- web/src/hooks/useSocketSync.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- web/src/pages/AgendaPage.tsx (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- web/src/pages/DashboardPage.tsx (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- web/src/pages/LoginPage.tsx (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- web/src/pages/SettingsPage.tsx (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- web/src/services/appointmentService.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- web/src/services/tenantService.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+- web/src/store/useAuthStore.ts (unknown linhas alteradas): Criação de novo módulo/funcionalidade/documentação.
+
+2. Arquivos Alterados
+- api/docker-compose.yml (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/package.json (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/prisma/schema.prisma (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/application/interfaces/repositories.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/application/useCases/ProcessIncomingMessageUseCase.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/application/useCases/SendMessageUseCase.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/application/workers/messageWorker.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/infrastructure/persistence/PrismaRepositories.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/interfaces/cron/scheduler.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/interfaces/http/controllers/ConversationController.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/interfaces/http/middleware/jwtAuth.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/interfaces/http/routes/conversationRoutes.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/interfaces/http/routes/index.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/lib/prisma.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/modules/conversations/ConversationService.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/modules/conversations/MessageService.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- api/src/server.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- web/package.json (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- web/src/App.tsx (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- web/src/features/inbox/components/ChatWindow.tsx (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- web/src/features/inbox/hooks/useConversations.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- web/src/features/inbox/hooks/useMessages.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- web/src/pages/InboxPage.tsx (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+- web/src/services/conversationService.ts (unknown linhas alteradas): Refatoração e aprimoramento de regras de negócios.
+
+3. Arquivos Removidos
+- api/prisma/migrations/20260210182955_init/migration.sql (unknown linhas alteradas): Remoção de arquivo obsoleto.
+- api/prisma/migrations/20260415184602_first_one/migration.sql (unknown linhas alteradas): Remoção de arquivo obsoleto.
+- api/prisma/migrations/20260415222515_add_outbound_id/migration.sql (unknown linhas alteradas): Remoção de arquivo obsoleto.

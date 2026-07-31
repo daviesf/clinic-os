@@ -10,7 +10,16 @@ export function startIncomingMessageWorker(useCase: ProcessIncomingMessageUseCas
   const worker = new Worker("incoming-message", async (job) => {
     const value = job.data;
     await handleStatus(value);
-    await useCase.execute(value);
+    
+    try {
+      await useCase.execute(value);
+    } catch (error: any) {
+      if (error.message?.includes("RATE_LIMIT")) {
+        logger.warn({ event: "worker.incoming_message.rate_limited", jobId: job.id, message: "Delaying retry due to API limits" });
+        // BullMQ will naturally retry this job according to the exponential backoff policy
+      }
+      throw error;
+    }
   }, { connection: redisClient });
 
   worker.on("failed", (job, err) => {

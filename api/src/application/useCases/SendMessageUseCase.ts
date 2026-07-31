@@ -5,6 +5,7 @@ import { MessageDirection, MessageStatus } from "../../modules/conversations/typ
 import { outboundMessageQueue } from "../queues/messageQueue";
 import { AppError } from "../../lib/errors";
 import { logger } from "../../lib/logger";
+import { emitToTenant } from "../../infrastructure/socket/emitter";
 
 export class SendMessageUseCase {
   constructor(
@@ -70,6 +71,9 @@ export class SendMessageUseCase {
       phone: conversation.phone,
       content: trimmedContent,
     });
+
+    // Emit realtime event
+    emitToTenant(tenantId, "new_message", message);
 
     logger.info({
       event: "usecase.send_message.enqueued",

@@ -5,6 +5,8 @@ export function buildConversationRoutes(controller: ConversationController): Rou
   const router = Router();
 
   router.get("/", (req, res) => controller.list(req, res));
+  router.post("/:conversationId/take-over", (req, res) => controller.takeOver(req, res));
+  router.post("/:conversationId/release", (req, res) => controller.release(req, res));
 
   return router;
 }

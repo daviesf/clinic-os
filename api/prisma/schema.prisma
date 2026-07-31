@@ -1,10 +1,13 @@
 generator client {
   provider = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+  extensions = [vector]
 }
 
 // Enums
@@ -13,6 +16,7 @@ enum ConversationStatus {
   AUTO
   SUGGESTION
   HUMAN
+  CLOSED
 }
 
 enum MessageDirection {
@@ -26,27 +30,72 @@ model User {
   password  String
   tenantId  String
   tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  auditLogs AuditLog[]
   createdAt DateTime @default(now())
 }
 
 model Tenant {
-  id            String         @id @default(uuid())
-  phoneNumberId String?        @unique
-  name          String
-  users         User[]
+  id                    String         @id @default(uuid())
+  phoneNumberId         String?        @unique
+  name                  String
+  specialty             String?
+  promptConfig          String?        @db.Text
+  businessHours         Json?
+  clinicAddress         String?
+  clinicTimezone        String         @default("America/Sao_Paulo")
+  aiModel               String         @default("gpt-4o")
+  aiTemperature         Float          @default(0.7)
+  autoHandoff           Boolean        @default(false)
+  whatsappToken         String?
+  webhookVerifyToken    String?
+  stripeCustomerId      String?        @unique
+  stripeSubscriptionId  String?        @unique
+  subscriptionStatus    String         @default("active") // active, past_due, canceled
+  users                 User[]
+  conversations         Conversation[]
+  appointments          Appointment[]
+  patients              Patient[]
+  semanticMemories SemanticMemory[]
+  episodicMemories EpisodicMemory[]
+  knowledgeBase KnowledgeBase[]
+  auditLogs     AuditLog[]
+  followUps     FollowUp[]
+  tasks         Task[]
+  createdAt     DateTime       @default(now())
+}
+
+model Patient {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  phone     String
+  name      String?
+  email     String?
+  notes     String?
+  lgpdConsent Boolean @default(false)
+  createdAt DateTime @default(now())
+
   conversations Conversation[]
   appointments  Appointment[]
-  createdAt     DateTime       @default(now())
+  semanticMemories SemanticMemory[]
+  episodicMemories EpisodicMemory[]
+  followUps     FollowUp[]
+  tasks         Task[]
+
+  @@index([tenantId, phone])
 }
 
 model Conversation {
   id            String   @id @default(uuid())
   tenantId      String
   tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  patientId     String?
+  patient       Patient? @relation(fields: [patientId], references: [id])
   phone         String
   status        ConversationStatus @default(AUTO)
   frictionScore Int      @default(0)
   messages      Message[]
+  episodicMemory EpisodicMemory?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -73,6 +122,8 @@ model Appointment {
   id        String   @id @default(uuid())
   tenantId  String
   tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  patientId String?
+  patient   Patient? @relation(fields: [patientId], references: [id])
   patientName String
   phone     String
   date      DateTime
@@ -91,4 +142,93 @@ model Log {
 
   @@index([level])
   @@index([createdAt])
+}
+
+model SemanticMemory {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id])
+  content   String
+  embedding Unsupported("vector(1536)")?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, patientId])
+}
+
+model EpisodicMemory {
+  id             String       @id @default(uuid())
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+  patientId      String
+  patient        Patient      @relation(fields: [patientId], references: [id])
+  conversationId String       @unique
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  summary        String
+  embedding      Unsupported("vector(1536)")?
+  createdAt      DateTime     @default(now())
+
+  @@index([tenantId, patientId])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  resource  String
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+model FollowUp {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id])
+  triggerAt DateTime
+  intent    String
+  status    String   @default("PENDING") // PENDING, SENT, CANCELLED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, triggerAt, status])
+}
+
+model KnowledgeBase {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  title     String
+  content   String   @db.Text
+  type      String   @default("TEXT") // TEXT, URL, PDF
+  sourceUrl String?
+  embedding Unsupported("vector(1536)")?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+}
+
+model Task {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  patientId   String?
+  patient     Patient? @relation(fields: [patientId], references: [id])
+  title       String
+  description String?
+  status      String   @default("PENDING") // PENDING, IN_PROGRESS, DONE
+  priority    String   @default("MEDIUM")  // LOW, MEDIUM, HIGH, URGENT
+  dueDate     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId, status])
 }

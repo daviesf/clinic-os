@@ -1,9 +1,12 @@
 import { useEffect, useRef } from "react";
 import { useMessages } from "@/features/inbox/hooks/useMessages";
+import { useConversations } from "@/features/inbox/hooks/useConversations";
 import { useInboxStore } from "@/features/inbox/store/inboxStore";
+import { takeOverConversation, releaseConversation } from "@/services/conversationService";
 import { MessageInput } from "./MessageInput";
 import { cn } from "@/lib/utils";
-import { Loader2, AlertCircle, MessagesSquare } from "lucide-react";
+import { Loader2, AlertCircle, MessagesSquare, UserRound, Bot } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 
 function formatMessageTime(dateString: string): string {
   const date = new Date(dateString);
@@ -13,7 +16,22 @@ function formatMessageTime(dateString: string): string {
 export function ChatWindow() {
   const conversationId = useInboxStore((s) => s.selectedConversationId);
   const { data: messages, isLoading, error } = useMessages(conversationId);
+  const { data: conversations } = useConversations();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
+
+  const currentConversation = conversations?.find((c) => c.id === conversationId);
+  const isHuman = currentConversation?.status === "HUMAN";
+
+  const handleToggleHandoff = async () => {
+    if (!conversationId) return;
+    if (isHuman) {
+      await releaseConversation(conversationId);
+    } else {
+      await takeOverConversation(conversationId);
+    }
+    queryClient.invalidateQueries({ queryKey: ["conversations"] });
+  };
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -27,8 +45,27 @@ export function ChatWindow() {
   return (
     <div className="h-full flex flex-col">
       {/* Chat Header */}
-      <div className="h-14 flex items-center px-4 border-b border-border shrink-0 bg-card">
-        <span className="text-sm font-medium">Conversa</span>
+      <div className="h-14 flex items-center justify-between px-4 border-b border-border shrink-0 bg-card">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">Conversa</span>
+          {isHuman && (
+            <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 rounded-full font-medium">
+              Modo Humano
+            </span>
+          )}
+        </div>
+        <button
+          onClick={handleToggleHandoff}
+          className={cn(
+            "flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-colors font-medium",
+            isHuman
+              ? "bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50"
+              : "bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50"
+          )}
+        >
+          {isHuman ? <Bot className="size-3.5" /> : <UserRound className="size-3.5" />}
+          {isHuman ? "Devolver à IA" : "Assumir"}
+        </button>
       </div>
 
       {/* Messages Area */}

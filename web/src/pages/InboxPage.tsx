@@ -1,26 +1,36 @@
 import { ConversationList } from "@/features/inbox/components/ConversationList";
 import { ChatWindow } from "@/features/inbox/components/ChatWindow";
+import { PatientSidebar } from "@/features/inbox/components/PatientSidebar";
 import { useInboxStore } from "@/features/inbox/store/inboxStore";
 import { MessageSquare } from "lucide-react";
+import { useSocketSync } from "@/hooks/useSocketSync";
 
 export default function InboxPage() {
   const selectedConversationId = useInboxStore((s) => s.selectedConversationId);
+  useSocketSync();
 
   return (
-    <div className="h-screen flex bg-background">
+    <div className="h-full flex bg-background">
       {/* Sidebar */}
       <div className="w-80 border-r border-border flex flex-col bg-card">
-        <div className="h-14 flex items-center gap-2 px-4 border-b border-border shrink-0">
-          <MessageSquare className="size-5 text-primary" />
-          <h1 className="text-base font-semibold tracking-tight">ClinicOS Inbox</h1>
+        <div className="h-14 flex items-center justify-between px-4 border-b border-border shrink-0">
+          <div className="flex items-center gap-2">
+            <MessageSquare className="size-5 text-primary" />
+            <h1 className="text-base font-semibold tracking-tight">ClinicOS Inbox</h1>
+          </div>
         </div>
         <ConversationList />
       </div>
 
-      {/* Chat Area */}
-      <div className="flex-1 flex flex-col">
+      {/* Main Content Area */}
+      <div className="flex-1 flex overflow-hidden">
         {selectedConversationId ? (
-          <ChatWindow />
+          <>
+            <div className="flex-1 overflow-hidden min-w-[400px]">
+              <ChatWindow />
+            </div>
+            <PatientSidebar />
+          </>
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">

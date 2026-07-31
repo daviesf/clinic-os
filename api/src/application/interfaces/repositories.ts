@@ -1,7 +1,16 @@
-import { Conversation, Message, Tenant, Appointment, Log, Prisma } from "@prisma/client";
+import { Conversation, Message, Tenant, Appointment, Log, Patient, Prisma } from "@prisma/client";
+
+export interface IPatientRepository {
+  findById(tenantId: string, id: string): Promise<Patient | null>;
+  findAll(tenantId: string, params: { search?: string; skip?: number; take?: number }): Promise<{ data: Patient[]; total: number }>;
+  create(data: Omit<Prisma.PatientUncheckedCreateInput, "id" | "createdAt">): Promise<Patient>;
+  update(tenantId: string, id: string, data: Partial<Patient>): Promise<Patient>;
+  delete(tenantId: string, id: string): Promise<void>;
+}
 
 export interface ConversationWithLastMessage extends Conversation {
   lastMessage: string | null;
+  patient?: any | null;
 }
 
 export interface IConversationRepository {
@@ -34,6 +43,7 @@ export interface IAppointmentRepository {
   findForTomorrow(tenantId?: string): Promise<(Appointment & { tenant?: Tenant })[]>;
   create(data: { tenantId: string; patientName: string; phone: string; date: Date }): Promise<Appointment>;
   countConflicts(tenantId: string, start: Date, end: Date): Promise<number>;
+  countByPhone(tenantId: string, phone: string, since: Date): Promise<number>;
 }
 
 export interface ILogRepository {
